@@ -1,0 +1,11 @@
+# Tout ce qui décrit une personne reste ici : voir les *.exemple.*
+reglages.json
+regles.md
+convention.md
+gardes.json
+etat-rangement.json
+gmail-factures.gs
+donnees/
+tri.lock
+__pycache__/
+.DS_Store

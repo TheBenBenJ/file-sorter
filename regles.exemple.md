@@ -1,0 +1,4 @@
+- Factures et dépenses professionnelles -> "50 Travail/Factures AAAA" ; toujours la date de la facture dans le nom.
+- Impôts et cotisations -> "20 Administratif/Impôts".
+- Pièces d'identité -> "10 Identité & Banque/Identité".
+- Captures d'écran -> "80 Images/Captures d'écran" ; photos -> "80 Images/Photos".
