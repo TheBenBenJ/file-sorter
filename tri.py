@@ -22,8 +22,8 @@ PREVIEWS = tempfile.mkdtemp(prefix="tri-icloud-")
 PARTIAL_EXT = (".crdownload", ".download", ".part", ".partial", ".tmp", ".opdownload")
 MAX_SIZE = 500 * 1024 * 1024   # au-delà, le fichier reste dans Téléchargements (dumps...)
 LOG = os.path.join(HOME, "Library/Logs/tri-icloud.log")
-LOCK = os.path.join(HOME, ".local/share/tri-icloud/tri.lock")
-GARDES = os.path.join(HOME, ".local/share/tri-icloud/gardes.json")   # fichiers laissés, à ne pas redemander
+LOCK = os.path.join(ICI, "tri.lock")
+GARDES = os.path.join(ICI, "gardes.json")   # fichiers laissés, à ne pas redemander
 CLAUDE = "/opt/homebrew/bin/claude"
 MODEL = os.environ.get("TRI_MODEL", "haiku")
 MIN_AGE = 60          # secondes sans modification avant de traiter un fichier

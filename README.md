@@ -13,7 +13,7 @@ Tri automatique d'iCloud Drive et des Téléchargements : Claude propose une des
 
 ## Installation
 
-Il faut macOS, la [CLI Claude Code](https://code.claude.com) et une arborescence numérotée dans iCloud Drive, avec un dossier `00 À trier`.
+Il faut macOS, la CLI Claude Code et une arborescence numérotée dans iCloud Drive, avec un dossier `00 À trier`.
 
 ```sh
 cp reglages.exemple.json reglages.json   # ton identité et le chemin du Drive
@@ -23,4 +23,4 @@ mkdir donnees
 python3 tri.py --dry-run
 ```
 
-Planifie ensuite `tri.py` avec launchd ou cron. Il lit tes documents et en envoie des extraits à l'API de Claude : à toi de juger si cela te convient pour tes fichiers sensibles. `tri.py` suppose le dossier `~/.local/share/tri-icloud` et Claude dans `/opt/homebrew/bin`.
+Planifie ensuite `tri.py` avec launchd ou cron. Il lit tes documents et en envoie des extraits à l'API de Claude : à toi de juger si cela te convient pour tes fichiers sensibles. `tri.py` suppose Claude dans `/opt/homebrew/bin`.
