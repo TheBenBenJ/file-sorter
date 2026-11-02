@@ -8,6 +8,7 @@ Trois façons de le lancer :
   tri.py --decider     sur un serveur où iCloud et le Drive sont montés en lecture seule : décide, ne déplace rien,
                        écrit tri-plan.json (ranger, laisser, doublon) ; tri-resultats.json, rendu par le Mac, retire ce qui est fait
   tri.py --appliquer   sur le Mac : applique tri-plan.json reçu du serveur, verse ~/Downloads dans 00 À trier, écrit tri-resultats.json
+  tri.py --deposer <icloud|drive> <chemin> <fichier>   sur le serveur : confie au Mac un document à écrire là (rapport du contrôle TVA, par exemple)
 Chemins : TRI_ICLOUD, TRI_DRIVE, TRI_DONNEES (plan, résultats, fichiers laissés), TRI_CLAUDE ; par défaut, ceux du Mac.
 """
 import fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, unicodedata
@@ -17,7 +18,7 @@ ICI = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(ICI, "reglages.json"), encoding="utf-8") as f:
     REGLAGES = json.load(f)   # identité et chemins personnels, hors du dépôt (voir reglages.exemple.json)
 MAC = sys.platform == "darwin"
-ROLE = "decider" if "--decider" in sys.argv else "appliquer" if "--appliquer" in sys.argv else "complet"
+ROLE = "decider" if "--decider" in sys.argv else "appliquer" if "--appliquer" in sys.argv else "deposer" if "--deposer" in sys.argv else "complet"
 IC = os.environ.get("TRI_ICLOUD") or os.path.join(HOME, "Library/Mobile Documents/com~apple~CloudDocs")
 DRIVE = os.environ.get("TRI_DRIVE") or os.path.join(HOME, REGLAGES["drive"])
 DONNEES = os.environ.get("TRI_DONNEES") or ICI
@@ -526,6 +527,16 @@ def appliquer_action(a, moved, kept):
         if not p.startswith(base + os.sep) or ".." in c["chemin"].split("/"):
             raise ValueError("chemin hors d'iCloud et du Drive")
         return p
+    if a["type"] == "deposer":   # document confié par le serveur, écrit ici sans jamais en écraser un autre
+        if a["cible"]["chemin"].startswith("00 "):
+            raise ValueError("destination dans une boîte d'arrivée")
+        target = unique(chemin(a["cible"]))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(a["contenu"])
+        moved.append(f"{os.path.basename(target)} → {os.path.dirname(a['cible']['chemin'])}")
+        log(f"DÉPOSÉ  {os.path.relpath(target, racines[a['cible']['racine']])}")
+        return "ok"
     src = chemin(a["source"])
     if nfc(os.path.dirname(src)) not in (nfc(INBOX), nfc(GMAIL_INBOX)):
         raise ValueError("source hors des boîtes d'arrivée")
@@ -557,6 +568,24 @@ def appliquer_action(a, moved, kept):
     return "ok"
 
 
+def deposer():
+    """Serveur : ajoute au plan un document à écrire par le Mac (action « deposer »), en attendant au besoin la fin d'une décision en cours."""
+    i = sys.argv.index("--deposer")
+    racine, rel, fichier = sys.argv[i + 1:i + 4]
+    if racine not in ("icloud", "drive") or rel.startswith("00 ") or ".." in rel.split("/"):
+        sys.exit("destination refusée")
+    contenu = open(fichier, encoding="utf-8").read()
+    with open(LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        plan = lire_json(PLAN, {"actions": [], "faites": {}})
+        cible = {"racine": racine, "chemin": nfc(rel)}
+        ident = hashlib.sha1(f"deposer|{racine}|{rel}|{contenu}".encode()).hexdigest()[:16]
+        if all(a["id"] != ident for a in plan["actions"]):
+            plan["actions"].append({"id": ident, "type": "deposer", "source": cible, "cible": cible, "contenu": contenu, "cree_le": time.time()})
+            ecrire_json(PLAN, plan)
+    log(f"À DÉPOSER {rel} ({len(contenu)} caractères) : le Mac l'écrira à son prochain passage")
+
+
 def verser_telechargements():
     """Mac : ~/Downloads part dans 00 À trier, où le serveur le voit et décide. Un fichier trop gros reste, signalé une fois."""
     if not os.path.isdir(DOWNLOADS):
@@ -579,4 +608,4 @@ def verser_telechargements():
 
 
 if __name__ == "__main__":
-    {"decider": decider, "appliquer": appliquer}.get(ROLE, main)()
+    {"decider": decider, "appliquer": appliquer, "deposer": deposer}.get(ROLE, main)()
