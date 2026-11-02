@@ -9,3 +9,6 @@ donnees/
 tri.lock
 __pycache__/
 .DS_Store
+tri-plan.json
+tri-resultats.json
+tri-appliques.json
