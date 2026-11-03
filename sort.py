@@ -598,6 +598,27 @@ MAC_FINE = ("ok", "absent", "modifié depuis la décision")   # the Mac's status
 DRIVE_WHAT = {"doublon": "mise à la corbeille du Drive", "vers 00 À trier": "déplacement vers 00 À trier", "rangement": "rangement dans le Drive"}
 
 
+DOWNLOADS_LOGGED = os.path.join(DATA, "downloads-logged.json")   # server: ids of the Mac's downloads already in the journal
+
+
+def downloads_events(entries):
+    """Server: the journal's events for what the Mac did with its Downloads (results.json), each once."""
+    logged = {k: v for k, v in read_json(DOWNLOADS_LOGGED, {}).items() if time.time() - v < 8 * 86400}
+    events = []
+    for x in entries:
+        try:
+            if x["id"] in logged:
+                continue
+            logged[x["id"]] = time.time()
+            events.append((x["action"], x["nom"], {"src": "Mac · Téléchargements", "dst": x.get("vers") or "Téléchargements",
+                                                   "detail": x.get("detail") or ""}))
+        except (KeyError, TypeError):   # an entry from another version of the Mac's side: skipped
+            continue
+    if events:
+        write_json(DOWNLOADS_LOGGED, logged)
+    return events
+
+
 def mac_event(a, status):
     """The journal's event for an action of the plan the Mac reports on in results.json: (action, object, fields)."""
     try:
@@ -672,7 +693,8 @@ def decide():
     try:
         REPORT.running("inboxes")
         plan = read_json(PLAN, {"actions": [], "faites": {}})
-        returned = read_json(RESULTS, {}).get("appliques", {})
+        results = read_json(RESULTS, {})
+        returned = results.get("appliques", {})
         done = {k: v for k, v in plan.get("faites", {}).items() if time.time() - v[1] < 3600}   # sources handled, until the mounts show it
         actions, came_back = [], []
         for a in plan.get("actions", []):
@@ -766,7 +788,7 @@ def decide():
         REPORT.running("plan")
         write_json(PLAN, {"genere_a": datetime.now().isoformat(timespec="seconds"), "actions": actions, "faites": done})
         REPORT.set("plan", "ok" if actions else "skipped")
-        for action, obj, fields in later:
+        for action, obj, fields in later + downloads_events(results.get("telechargements") or []):
             activity.log(action, obj, **fields)
         activity.recovered("passage du tri")
     except Exception as e:
@@ -807,7 +829,8 @@ def apply_plan():
                 applied[a["id"]] = [status, time.time()]
         move_downloads()
         write_json(APPLIED, applied)
-        write_json(RESULTS, {"rendu_le": datetime.now().isoformat(timespec="seconds"), "appliques": {k: v[0] for k, v in applied.items()}})
+        write_json(RESULTS, {"rendu_le": datetime.now().isoformat(timespec="seconds"), "appliques": {k: v[0] for k, v in applied.items()},
+                             "telechargements": read_json(DOWNLOADS_SEEN, [])})
         if moved or kept:
             msg = f"{len(moved)} rangé(s)" + (f", {len(kept)} laissé(s) dans À trier" if kept else "")
             notify(moved[0] if len(moved) == 1 and not kept else msg)
@@ -889,6 +912,18 @@ def deposit():
     log(f"À DÉPOSER {rel} ({len(content)} characters): the Mac will write it on its next pass")
 
 
+DOWNLOADS_SEEN = os.path.join(DATA, "downloads.json")   # Mac: what move_downloads did in the last 7 days, sent back in results.json
+
+
+def note_download(action, name, size, dest, detail=""):
+    """Mac: remembers a download handled, for the server's activity journal (the Mac writes no journal itself)."""
+    seen = [x for x in read_json(DOWNLOADS_SEEN, []) if time.time() - x.get("t", 0) < 7 * 86400]
+    when = datetime.now().isoformat(timespec="seconds")
+    seen.append({"id": hashlib.sha1(f"{name}|{size}|{when}".encode()).hexdigest()[:16], "t": time.time(), "quand": when,
+                 "action": action, "nom": name, "taille": size, "vers": dest, "detail": detail})
+    write_json(DOWNLOADS_SEEN, seen[-300:])
+
+
 def move_downloads():
     """Mac: the documents of ~/Downloads go into the Drive's 00 À trier, where the server sees them and decides. What is not a
     document (installers, archives, videos...) or is too big stays in Downloads, reported once; nothing is ever deleted there."""
@@ -905,15 +940,19 @@ def move_downloads():
         if not f.lower().endswith(DOCUMENTS):
             save_kept(p)
             log(f"LAISSÉ  {f}  (not a document) left in Downloads")
+            note_download("laissé", f, st.st_size, "Téléchargements", "pas un document : installeur, archive, vidéo… gardé dans Téléchargements")
             continue
         if st.st_size > MAX_SIZE:
             save_kept(p)
             log(f"TROP GROS {f}  ({st.st_size // 2**20} MB) left in Downloads")
             notify(f"{f} ({st.st_size // 2**20} Mo) trop gros pour le Drive, laissé dans Téléchargements")
+            note_download("trop gros", f, st.st_size, "Téléchargements", f"{st.st_size // 2**20} Mo, au-delà de {MAX_SIZE // 2**20} Mo : gardé dans Téléchargements")
             continue
         os.makedirs(DRIVE_INBOX, exist_ok=True)
-        shutil.move(p, unique(os.path.join(DRIVE_INBOX, f)))
+        target = unique(os.path.join(DRIVE_INBOX, f))
+        shutil.move(p, target)
         log(f"VERSÉ   {f}  -> Drive/00 À trier")
+        note_download("versé", f, st.st_size, where(target), "téléchargement du Mac versé dans la boîte du Drive, que le serveur trie")
 
 
 if __name__ == "__main__":
