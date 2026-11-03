@@ -380,8 +380,14 @@ def choose(files):
             choices.append((src, None, name, conf, d))
             continue
         new = name
-        if d.get("nouveau_nom") and not dest.startswith("80 Images/Photos") and not dest.startswith("80 Images/Captures"):
+        keeps_name = dest.startswith("80 Images/Photos") or dest.startswith("80 Images/Captures")   # photos and screenshots keep theirs
+        if d.get("nouveau_nom") and not keeps_name:
             new = clean_name(d["nouveau_nom"], name)
+        if new == name and not keeps_name and os.path.dirname(src) == ATTACH_INBOX:
+            # an exported attachment's name never follows the convention: no name proposed means the model meant something else
+            # (a copy of another document of the batch, to throw away, which the answer cannot say): the file stays in its inbox
+            choices.append((src, None, name, conf, d))
+            continue
         choices.append((src, dest, new, conf, d))
     for p in files:
         if p not in answered:
