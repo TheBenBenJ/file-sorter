@@ -10,11 +10,11 @@ The code, its file names and its options are in English. The documents' folders 
 
 ## How it works
 
-Inboxes: Google Drive `00 À trier`, the main one (the Mac pours the documents of its `~/Downloads` into it); Google Drive `00 Factures entrantes`, filled every hour by an Apps Script that imports invoices from Gmail (`gmail-invoices.gs`, kept out of this repo); and iCloud `00 À trier`, where the phone's downloads land (on an iPhone, neither Safari nor Shortcuts can choose a Google Drive folder).
+Inboxes: Google Drive `00 À trier`, the main one (the Mac pours the documents of its `~/Downloads` into it); Google Drive `00 Factures entrantes`, filled every hour by an Apps Script that imports invoices from Gmail (`gmail-invoices.gs`, kept out of this repo); iCloud `00 À trier`, where the phone's downloads land (on an iPhone, neither Safari nor Shortcuts can choose a Google Drive folder); and, read last, Google Drive `00 Pièces jointes`, where the owner's mail sorter (a separate, private repo) exports every document attached to his mails, received and sent, once per content, named `<date of the mail> <subject> - <original name>` so that the date and the subject help the decision.
 
 For each file at least 60 seconds old (15 per pass): a short text extract (`pdftotext`, `textutil`, the XML inside office files) or an image preview, then one `claude -p` call with the Read tool only. Claude answers in JSON for each file: destination, new name, confidence, reason. The script validates and acts:
 
-- confidence below 0.7, or a destination outside the existing tree (one new sub-folder level is allowed): the file stays in its `00 À trier` (an invoice from Gmail, or a download in the original mode, is moved to the Drive's) and is remembered in `kept.json` so it is not asked about again;
+- confidence below 0.7, or a destination outside the existing tree (one new sub-folder level is allowed): the file stays in its `00 À trier` (an invoice from Gmail, or a download in the original mode, is moved to the Drive's; a mail attachment stays in `00 Pièces jointes`) and is remembered in `kept.json` so it is not asked about again;
 - never overwrite: a name already taken gets ` (2)`;
 - an exact copy (SHA-1) of a document already filed in iCloud goes to the Trash, never deleted;
 - editable files (`.docx`, `.xlsx`, `.pptx`…) go to the same path in the Drive, where the Apps Script converts them to Google Docs and Sheets; finished documents (PDF, images) go to iCloud, the archive;
@@ -28,9 +28,11 @@ For each file at least 60 seconds old (15 per pass): a short text extract (`pdft
 ```
    Server (Linux, timer every 5 min)                                      Mac (relay agent every 5 min)
  Drive 00 À trier ──────┐ read-only mounts
- Drive 00 Factures ─────┼─► sort.py --decide ──┬─► inside the Drive, itself (rclone):
-   entrantes            │    (Claude, Read)    │   editable files filed, doubtful invoices
- iCloud 00 À trier ─────┘                      │   into 00 À trier, duplicates to its trash
+ Drive 00 Factures ─────┤
+   entrantes            ├─► sort.py --decide ──┬─► inside the Drive, itself (rclone):
+ iCloud 00 À trier ─────┤    (Claude, Read)    │   editable files filed, doubtful invoices
+ Drive 00 Pièces ───────┘                      │   into 00 À trier, duplicates to its trash
+   jointes (mails)                             │
                                                └─► plan.json ───────── pulled ──────► sort.py --apply
                                                                                       ├─ checks every action again
                         ◄────────────── results.json ◄──────── pushed ────────────────┤─ moves into iCloud (from the Drive's
@@ -48,7 +50,7 @@ Plan actions (`plan.json`): `ranger` (file it at `cible`), `doublon` (to the Tra
 
 ### Other scripts
 
-- `audit.py`: no AI; writes `tidiness-state.json` (loose files next to sub-folders, names outside the convention, files waiting in an inbox for more than 7 days) for a dashboard. `sort.py` runs it after each pass on the Mac.
+- `audit.py`: no AI; writes `tidiness-state.json` (loose files next to sub-folders, names outside the convention, files waiting in an inbox for more than 7 days, `00 Pièces jointes` excepted: it keeps doubtful attachments on purpose) for a dashboard. `sort.py` runs it after each pass on the Mac.
 - `rename.py plan|apply|undo`: bulk renaming of existing documents according to `convention.md`. `plan` writes `data/rename-plan.json` and a `.tsv` to review, `apply` keeps an undo journal (`data/rename-undo.json`), `undo` restores the names.
 - `apply_plan.py verify|apply|undo`: applies a tidying plan (a JSON list of `move` and `trash` operations) after checks, with an undo journal in `data/` (`undo-tidy-<date>.json`).
 
@@ -73,6 +75,7 @@ python3 sort.py --dry-run
 | `FILE_SORTER_DATA` | folder of `plan.json`, `results.json`, `applied.json`, `kept.json`, `sort.lock` | the script's folder |
 | `FILE_SORTER_INBOX` | another iCloud inbox, for a trial | iCloud `00 À trier` |
 | `FILE_SORTER_DRIVE_INBOX` | another Drive inbox, for a trial | Drive `00 À trier` |
+| `FILE_SORTER_ATTACHMENTS_INBOX` | another inbox of mail attachments, for a trial | Drive `00 Pièces jointes` |
 | `FILE_SORTER_DRIVE_RCLONE` | server: rclone remote allowed to write the Drive (`gsort:`); unset, only the Mac moves | unset |
 | `FILE_SORTER_DOWNLOADS_MAX_MB` | largest download poured into the Drive | `50` |
 | `FILE_SORTER_CLAUDE` | `claude` binary | `/opt/homebrew/bin/claude` |
@@ -115,6 +118,7 @@ Before deploying a change: `python3 -I -m py_compile sort.py`, then `python3 -I 
 - **Downloads: documents only, 50 MB at most.** Everything poured into the Drive is uploaded, and a finished document comes back down when the Mac files it in iCloud: installers, archives and videos have no place in the archive, and a big file would cost two transfers for nothing. They stay in Downloads, never deleted by the sorting, and the dashboard lists them after a week.
 - **Idempotent plan.** Action ids come from the content (type, path, size); the Mac remembers applied ids for 7 days (`applied.json`), so a plan fetched twice is applied once; the server drops actions never returned within a week and remembers handled sources for an hour, because the mounts show changes a few minutes late.
 - **`kept.json` signatures differ by machine**: `name|size|mtime` on the Mac, `name|size` on the server, because a file the Mac moves keeps its name and size but not its date.
+- **Mail attachments: a fourth inbox, read last, that keeps its doubtful files** (03/11/2026, the owner's wish that every attachment of his mail goes through the sorting, the backlog once, then new mail). The mail sorter exports each document once into the Drive's `00 Pièces jointes`, at about the pace of the sorting (40 files every 15 minutes, 15 decided every 5). A doubtful attachment stays there, remembered in `kept.json`, instead of joining `00 À trier`: a mailbox's backlog (some 1,600 files here) would bury the documents the owner drops himself; for the same reason the folder is read after the other inboxes and the audit does not list its files as waiting. Duplicates of the archive go to the Drive's trash, like any other inbox's. Files already planned for the Mac no longer count among a pass's 15: they held back the next ones while the Mac slept or the mounts lagged.
 - **Downloads go through the Drive's `00 À trier`.** The server cannot see the Mac's Downloads; pouring them into the single inbox keeps one place where decisions are made.
 - **Duplicates by size, then SHA-1**: only files of the same size are hashed, which keeps the walk of iCloud cheap.
 - **One lock per data folder**: a pass that finds another running exits; `--deposit` waits for the lock, so a report is never lost.

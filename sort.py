@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Sorts the inboxes into the numbered folder tree, automatically: the Drive's 00 À trier (where the iPhone and the Mac's
-Downloads put documents), the Drive's 00 Factures entrantes (invoices from Gmail) and iCloud's 00 À trier.
+Downloads put documents), the Drive's 00 Factures entrantes (invoices from Gmail), iCloud's 00 À trier, and last the Drive's
+00 Pièces jointes (the attachments of the mails, exported by the mail sorter; a doubtful one stays there).
 Claude (CLI, Read tool only) proposes a destination and a name for each file; this script validates them and files the
 file: editable documents in the Drive, finished ones in iCloud. Nothing is ever overwritten; when in doubt, the file stays.
 
@@ -13,7 +14,7 @@ Ways to run it:
                        Drive's 00 À trier, writes results.json
   sort.py --deposit <icloud|drive> <path> <file>   on the server: hands the Mac a document to write there (the VAT check report, for example)
 Paths: FILE_SORTER_ICLOUD, FILE_SORTER_DRIVE, FILE_SORTER_DATA (plan, results, files left in place), FILE_SORTER_CLAUDE; the defaults are the Mac's.
-FILE_SORTER_INBOX and FILE_SORTER_DRIVE_INBOX replace the inboxes for a trial, FILE_SORTER_MODEL the model (haiku),
+FILE_SORTER_INBOX, FILE_SORTER_DRIVE_INBOX and FILE_SORTER_ATTACHMENTS_INBOX replace the inboxes for a trial, FILE_SORTER_MODEL the model (haiku),
 FILE_SORTER_DOWNLOADS_MAX_MB the largest download poured into the Drive (50).
 """
 import fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, unicodedata
@@ -38,7 +39,10 @@ INBOX = os.environ.get("FILE_SORTER_INBOX") or os.path.join(ICLOUD, "00 À trier
 DRIVE_INBOX = os.environ.get("FILE_SORTER_DRIVE_INBOX") or os.path.join(DRIVE, "00 À trier")   # the single inbox: iPhone, Mac's Downloads
 DOWNLOADS = os.path.join(HOME, "Downloads")
 GMAIL_INBOX = os.path.join(DRIVE, "00 Factures entrantes")  # filled by gmail-invoices.gs
-DRIVE_INBOXES = (DRIVE_INBOX, GMAIL_INBOX)
+# the attachments of the mails, received and sent, exported by the mail sorter (attachments.py): read last, so that Benjamin's own
+# inboxes go first; a doubtful file stays there, remembered in kept.json, rather than flooding 00 À trier with a mailbox's backlog
+ATTACH_INBOX = os.environ.get("FILE_SORTER_ATTACHMENTS_INBOX") or os.path.join(DRIVE, "00 Pièces jointes")
+DRIVE_INBOXES = (DRIVE_INBOX, GMAIL_INBOX, ATTACH_INBOX)
 DRIVE_RCLONE = os.environ.get("FILE_SORTER_DRIVE_RCLONE")   # server: rclone remote allowed to write the Drive ("gsort:"); unset, only the Mac moves
 EXTERNAL = (DOWNLOADS, GMAIL_INBOX)   # sources Benjamin does not look at: a doubtful file goes to the Drive's 00 À trier
 OFFICE = (".docx", ".doc", ".odt", ".xlsx", ".xls", ".ods", ".pptx", ".ppt", ".odp")   # editable: filed in the Drive (same tree), finished documents in iCloud
@@ -150,7 +154,9 @@ def save_kept(p, signature=None):   # signature: taken before the server moved t
 TOO_BIG = set()
 
 
-def pending(sources):
+def pending(sources, skip=lambda p: False):
+    """The files to decide, MAX_FILES at most, in the order of the sources. skip: files already planned or handled, left out before
+    the count, so that files waiting for the Mac never hold back the next ones."""
     now = time.time()
     kept = load_kept()
     files = []
@@ -165,7 +171,7 @@ def pending(sources):
             if f.startswith(".") or f.lower().endswith(PARTIAL_EXT) or not os.path.isfile(p):
                 continue
             st = os.stat(p)
-            if now - max(st.st_mtime, st.st_ctime) < MIN_AGE or sig(p) in kept:
+            if now - max(st.st_mtime, st.st_ctime) < MIN_AGE or sig(p) in kept or skip(p):
                 continue
             if src == DOWNLOADS and (st.st_size > MAX_SIZE or not f.lower().endswith(DOCUMENTS)):
                 if p not in TOO_BIG and st.st_size > MAX_SIZE and f.lower().endswith(DOCUMENTS):
@@ -265,7 +271,7 @@ Fichiers à classer :
 
 {chr(10).join(blocks)}
 """
-    dirs = [x for d in (INBOX, DRIVE_INBOX, DOWNLOADS, GMAIL_INBOX, PREVIEWS) if os.path.isdir(d) for x in ("--add-dir", d)]
+    dirs = [x for d in (INBOX, DRIVE_INBOX, DOWNLOADS, GMAIL_INBOX, ATTACH_INBOX, PREVIEWS) if os.path.isdir(d) for x in ("--add-dir", d)]
     cmd = [CLAUDE, "-p", prompt, "--model", MODEL, "--output-format", "json",
            "--json-schema", json.dumps(SCHEMA), "--tools", "Read", "--allowedTools", "Read",
            *dirs, "--strict-mcp-config", "--setting-sources", "project", "--no-session-persistence"]
@@ -393,7 +399,7 @@ def main():
         moved, kept = [], []
         done = set()
         while True:
-            files = [p for p in pending((DOWNLOADS, GMAIL_INBOX, DRIVE_INBOX, INBOX)) if p not in done]
+            files = pending((DOWNLOADS, GMAIL_INBOX, DRIVE_INBOX, INBOX, ATTACH_INBOX), skip=lambda p: p in done)
             if not files:
                 break
             done.update(files)
@@ -428,7 +434,8 @@ def batch(files, moved, kept):
     for src, dest, new, conf, d in choose(files):
         name = os.path.basename(src)
         if dest is None:
-            kept.append(name)
+            if os.path.dirname(src) != ATTACH_INBOX:   # a doubtful attachment stays in its inbox, without a notification
+                kept.append(name)
             if not DRY and os.path.dirname(src) in EXTERNAL:
                 os.makedirs(DRIVE_INBOX, exist_ok=True)
                 target = unique(os.path.join(DRIVE_INBOX, name))
@@ -504,8 +511,8 @@ def drive_move(src, folder, name):
 
 
 def decide():
-    """Server: decides for the inboxes (the Drive's 00 À trier and 00 Factures entrantes, iCloud's 00 À trier).
-    Into iCloud, and out of iCloud, only the Mac moves: plan.json keeps the actions it has not returned yet. Inside the Drive,
+    """Server: decides for the inboxes (the Drive's 00 À trier and 00 Factures entrantes, iCloud's 00 À trier, the Drive's 00 Pièces
+    jointes). Into iCloud, and out of iCloud, only the Mac moves: plan.json keeps the actions it has not returned yet. Inside the Drive,
     with FILE_SORTER_DRIVE_RCLONE, the server files itself: editable documents into the tree, doubtful invoices into 00 À trier,
     duplicates to the Drive's trash. A source already planned or just handled is not asked about again."""
     lock = open(LOCK, "w")
@@ -526,7 +533,7 @@ def decide():
             elif time.time() - a.get("cree_le", 0) < 7 * 86400:   # an action not returned within a week is dropped
                 actions.append(a)
         planned = {f"{a['source']['racine']}|{a['source']['chemin']}" for a in actions} | set(done)
-        files = [p for p in pending((GMAIL_INBOX, DRIVE_INBOX, INBOX)) if "|".join(relative(p)) not in planned]
+        files = pending((GMAIL_INBOX, DRIVE_INBOX, INBOX, ATTACH_INBOX), skip=lambda p: "|".join(relative(p)) in planned)
         server_side = lambda p: bool(DRIVE_RCLONE) and os.path.dirname(p) in DRIVE_INBOXES
 
         def by_server(p, what, act):   # a move in the Drive done here; a failure is kept for the end of the pass, the file stays
@@ -553,7 +560,7 @@ def decide():
                     name = os.path.basename(src)
                     if dest is None:
                         signature = sig(src)   # before a move: the mount may stop showing the file at once
-                        if os.path.dirname(src) == GMAIL_INBOX:   # a doubtful invoice joins the inbox Benjamin looks at
+                        if os.path.dirname(src) == GMAIL_INBOX:   # a doubtful invoice joins the inbox Benjamin looks at; an attachment stays
                             if server_side(src):
                                 if not by_server(src, "vers 00 À trier", lambda: drive_move(src, os.path.relpath(DRIVE_INBOX, DRIVE), name)):
                                     continue
@@ -639,7 +646,7 @@ def apply_action(a, moved, kept):
         log(f"DÉPOSÉ  {os.path.relpath(target, roots[a['cible']['racine']])}")
         return "ok"
     src = resolve(a["source"])
-    if nfc(os.path.dirname(src)) not in (nfc(INBOX), nfc(GMAIL_INBOX), nfc(DRIVE_INBOX)):
+    if nfc(os.path.dirname(src)) not in (nfc(INBOX), nfc(GMAIL_INBOX), nfc(DRIVE_INBOX), nfc(ATTACH_INBOX)):
         raise ValueError("source hors des boîtes d'arrivée")
     if not os.path.exists(src):
         return "absent"

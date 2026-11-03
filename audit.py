@@ -2,7 +2,7 @@
 """Tidiness audit, without AI: counts what is not tidy in iCloud and the Drive.
 
 Writes tidiness-state.json (read by the Dashboard): loose files next to subfolders,
-names outside the convention, files lying in « 00 À trier » for more than 7 days, and what the sorting
+names outside the convention, files lying in an inbox (« 00 À trier »...) for more than 7 days, and what the sorting
 left in ~/Downloads (not a document, or too big for the Drive) for more than 7 days.
 Reads names and dates only: nothing is downloaded, modified or deleted.
 """
@@ -26,6 +26,9 @@ LOOSE_ALLOWED = set(SETTINGS["vrac_autorise"])
 SUSPECT_NAME = re.compile(r"_|\(\d+\)|[0-9a-f]{8}-[0-9a-f]{4}|compressed|^IMG_\d|^(?!.*[a-zà-ÿ]).{8,}\.\w+$|^(Document|Scan|Numériser|image|téléchargement)\b", re.I)
 CODE_MARKERS = {"package.json", "composer.json", "pom.xml", ".git", "angular.json", "src", "app", "vendor", "node_modules"}
 STALE_AFTER = 7 * 86400
+# The Drive's inbox of mail attachments keeps the doubtful ones on purpose (kept.json): hundreds after a mailbox's backlog, which the
+# Dashboard's tile would show as files waiting; Benjamin looks at it when he wants to
+QUIET_INBOXES = ("00 Pièces jointes",)
 
 
 def audit():
@@ -42,7 +45,7 @@ def audit():
                 continue
             fs = [f for f in fs if not f.startswith(".") and not f.endswith((".gscript",))]
             if rel.startswith("00 "):
-                for f in fs:
+                for f in fs if rel.split(os.sep)[0] not in QUIET_INBOXES else ():
                     try:
                         if now - max(os.stat(os.path.join(r, f)).st_mtime, os.stat(os.path.join(r, f)).st_ctime) > STALE_AFTER:
                             stale.append(f"{label}/{rel}/{f}")
