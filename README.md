@@ -1,4 +1,6 @@
-# tri-icloud
+# file-sorter
+
+*Formerly `tri-icloud` (renamed on 03/11/2026). The installed folder keeps that name, `~/.local/share/tri-icloud`, because it also holds the tool's state, which other programs read.*
 
 Automatic filing of personal documents into a numbered folder tree on iCloud Drive (and Google Drive for office files). Claude proposes a destination and a clean name for each new file; a plain Python script validates the proposal and moves the file. Nothing is ever overwritten, and when in doubt the file stays where it is.
 
