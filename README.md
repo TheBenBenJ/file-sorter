@@ -10,34 +10,39 @@ The code, its file names and its options are in English. The documents' folders 
 
 ## How it works
 
-Inboxes: iCloud `00 À trier`, `~/Downloads` on the Mac, and Google Drive `00 Factures entrantes`, filled every hour by an Apps Script that imports invoices from Gmail (`gmail-invoices.gs`, kept out of this repo).
+Inboxes: Google Drive `00 À trier`, the single inbox (the phone saves there, and the Mac pours the documents of its `~/Downloads` into it); Google Drive `00 Factures entrantes`, filled every hour by an Apps Script that imports invoices from Gmail (`gmail-invoices.gs`, kept out of this repo); and iCloud `00 À trier`, still read for what is saved there.
 
 For each file at least 60 seconds old (15 per pass): a short text extract (`pdftotext`, `textutil`, the XML inside office files) or an image preview, then one `claude -p` call with the Read tool only. Claude answers in JSON for each file: destination, new name, confidence, reason. The script validates and acts:
 
-- confidence below 0.7, or a destination outside the existing tree (one new sub-folder level is allowed): the file stays in `00 À trier` (files from Downloads or the Drive inbox are moved there) and is remembered in `kept.json` so it is not asked about again;
+- confidence below 0.7, or a destination outside the existing tree (one new sub-folder level is allowed): the file stays in its `00 À trier` (an invoice from Gmail, or a download in the original mode, is moved to the Drive's) and is remembered in `kept.json` so it is not asked about again;
 - never overwrite: a name already taken gets ` (2)`;
 - an exact copy (SHA-1) of a document already filed in iCloud goes to the Trash, never deleted;
-- office files (`.docx`, `.xlsx`…) go to the same path in the Drive, where the Apps Script converts them to Google Docs and Sheets; finished documents (PDF, images) go to iCloud, the archive;
-- photos and screenshots keep their name; files over 500 MB stay in Downloads, reported once.
+- editable files (`.docx`, `.xlsx`, `.pptx`…) go to the same path in the Drive, where the Apps Script converts them to Google Docs and Sheets; finished documents (PDF, images) go to iCloud, the archive;
+- photos and screenshots keep their name;
+- from `~/Downloads`, only documents (PDF, images, office and iWork files, text, CSV) of 50 MB at most go to the Drive; installers, archives, videos and bigger files stay in Downloads (a too big document is reported once), are never deleted, and are listed on the dashboard after 7 days.
 
 ### Two ways to run it
 
-**Split (in service): a home server decides, the Mac moves.**
+**Split (in service): a home server decides and files the Drive, the Mac files iCloud.**
 
 ```
-   Server (Linux, timer every 5 min)                              Mac (relay agent every 5 min)
- iCloud 00 À trier ──┐ read-only
- Drive 00 Factures ──┼─► sort.py --decide ──► plan.json ──────── pulled ─────► sort.py --apply
-   entrantes         │    (Claude, Read only)                                  ├─ checks every action again
-                     │                                                         ├─ moves into iCloud / the Drive
-                     └──◄ results.json ◄────────────────────── pushed ─────────┤  duplicates to the Trash
-                                                                               └─ ~/Downloads ──► 00 À trier
+   Server (Linux, timer every 5 min)                                      Mac (relay agent every 5 min)
+ Drive 00 À trier ──────┐ read-only mounts
+ Drive 00 Factures ─────┼─► sort.py --decide ──┬─► inside the Drive, itself (rclone):
+   entrantes            │    (Claude, Read)    │   editable files filed, doubtful invoices
+ iCloud 00 À trier ─────┘                      │   into 00 À trier, duplicates to its trash
+                                               └─► plan.json ───────── pulled ──────► sort.py --apply
+                                                                                      ├─ checks every action again
+                        ◄────────────── results.json ◄──────── pushed ────────────────┤─ moves into iCloud (from the Drive's
+                                                                                      │  inboxes through Google Drive for desktop)
+                                                                                      ├─ duplicates to the Trash
+                                                                                      └─ documents of ~/Downloads ──► Drive 00 À trier
  vat check ──► sort.py --deposit icloud <path> <file> ──► "deposer" action ──► the Mac writes the report
 ```
 
-The server reads iCloud and the Drive through read-only mounts and writes a plan. The Mac, the only machine that writes into iCloud, fetches the plan, applies it and sends back what it did. The server never connects to the Mac: when the Mac sleeps, files simply wait in their inbox.
+The server reads iCloud and the Drive through read-only mounts. Inside the Drive it files itself, through an rclone remote allowed to write it (`FILE_SORTER_DRIVE_RCLONE`): so the Drive is sorted even when the Mac sleeps. Into or out of iCloud, only the Mac moves: it fetches the plan, applies it and sends back what it did; a finished document waiting in a Drive inbox reaches iCloud that way, the Mac reading it through Google Drive for desktop. The server never connects to the Mac: when the Mac sleeps, those files simply wait in their inbox.
 
-Plan actions (`plan.json`): `ranger` (file it at `cible`), `doublon` (to the Trash), `vers_a_trier` (from the Drive inbox to iCloud `00 À trier`, when unsure), `deposer` (write a document handed over by the server). An action's id is a hash of type, root, path and size. The Mac answers in `results.json` with `ok`, `absent`, `modifié depuis la décision` or `erreur : …`, and says nothing yet for an iCloud file that is not downloaded.
+Plan actions (`plan.json`): `ranger` (file it at `cible`), `doublon` (to the Trash), `vers_a_trier` (a doubtful invoice into the Drive's `00 À trier`, when the server cannot move it itself), `deposer` (write a document handed over by the server). An action's id is a hash of type, root, path and size. The Mac answers in `results.json` with `ok`, `absent`, `modifié depuis la décision` or `erreur : …`, and says nothing yet for an iCloud file that is not downloaded.
 
 **Original: everything on the Mac.** `sort.py` alone decides and moves (a launchd agent watching the inboxes, and every 30 minutes). `sort.py --dry-run` shows what it would do. This mode is also the rollback of the split one; the two never run at the same time.
 
@@ -66,7 +71,10 @@ python3 sort.py --dry-run
 | `FILE_SORTER_ICLOUD` | iCloud Drive root | `~/Library/Mobile Documents/com~apple~CloudDocs` |
 | `FILE_SORTER_DRIVE` | Google Drive root | `~/` + `drive` of `settings.json` |
 | `FILE_SORTER_DATA` | folder of `plan.json`, `results.json`, `applied.json`, `kept.json`, `sort.lock` | the script's folder |
-| `FILE_SORTER_INBOX` | another inbox, for a trial | iCloud `00 À trier` |
+| `FILE_SORTER_INBOX` | another iCloud inbox, for a trial | iCloud `00 À trier` |
+| `FILE_SORTER_DRIVE_INBOX` | another Drive inbox, for a trial | Drive `00 À trier` |
+| `FILE_SORTER_DRIVE_RCLONE` | server: rclone remote allowed to write the Drive (`gsort:`); unset, only the Mac moves | unset |
+| `FILE_SORTER_DOWNLOADS_MAX_MB` | largest download poured into the Drive | `50` |
 | `FILE_SORTER_CLAUDE` | `claude` binary | `/opt/homebrew/bin/claude` |
 | `FILE_SORTER_MODEL` | model | `haiku` |
 
@@ -78,11 +86,11 @@ The file names above are shared between the server, the Mac and a dashboard, and
 
 ## Operations and troubleshooting
 
-Logs: on the Mac `~/Library/Logs/file-sorter.log`; on the server the service journal. Each line starts with a French keyword that docs and habits search for: `RANGÉ` (filed), `GARDÉ` (left in `00 À trier`), `DOUBLON` (duplicate to the Trash), `DÉPOSÉ` (document written), `VERSÉ` (Downloads poured into `00 À trier`), `PLAN` (server decision), `MAC` (status returned by the Mac), `ERREUR`, `SANS RÉPONSE` (no answer for that file, retried), `ATTENTE` (file or folder not available yet, retried), `TROP GROS`, `À DÉPOSER`. Notifications are French too: macOS notifications on the Mac, a `notifier` command on the server.
+Logs: on the Mac `~/Library/Logs/file-sorter.log`; on the server the service journal. Each line starts with a French keyword that docs and habits search for: `RANGÉ` (filed), `GARDÉ` (left in `00 À trier`), `DOUBLON` (duplicate to the Trash), `DÉPOSÉ` (document written), `VERSÉ` (a download poured into the Drive's `00 À trier`), `LAISSÉ` (a download that is not a document, left in Downloads), `PLAN` (server decision), `MAC` (status returned by the Mac), `ERREUR`, `SANS RÉPONSE` (no answer for that file, retried), `ATTENTE` (file or folder not available yet, retried), `TROP GROS`, `À DÉPOSER`. Notifications are French too: macOS notifications on the Mac, a `notifier` command on the server.
 
 | Symptom | Cause | Remedy |
 |---|---|---|
-| « Resource deadlock avoided » (Errno 11) | the iCloud or Drive file is only in the cloud and a launchd job may not download it | `materialize()` asks `brctl download` and retries; keep the Drive inbox « available offline » |
+| « Resource deadlock avoided » (Errno 11) | the iCloud or Drive file is only in the cloud, and a launchd job may not download it by default | `sort.py` allows itself to (`setiopolicy_np`, at start on the Mac); `materialize()` also asks `brctl download` for iCloud and retries on the next pass |
 | A file is never filed | it was left (`GARDÉ`) or Claude skipped it (`SANS RÉPONSE`) | read the log; remove its line from `kept.json` (server: `name|size`, Mac: `name|size|mtime`) to have it examined again |
 | A file waits in `00 À trier` | Mac asleep, plan not fetched yet, mounts a few minutes behind | wait for the next pass, or run the relay by hand; an action not returned within 7 days is dropped by the server |
 | A rule or convention change has no effect | the server has its own copy of the personal files | copy `settings.json`, `rules.md` and `convention.md` to the server again |
@@ -95,17 +103,19 @@ Before deploying a change: `python3 -I -m py_compile sort.py`, then `python3 -I 
 
 - No secrets in the repo. Personal files (`settings.json`, `rules.md`, `convention.md`, `kept.json`, `gmail-invoices.gs`) and all state files are ignored by git, under their former French names too; the `*.example.*` files show their format.
 - Documents are untrusted input, and a document can try to give instructions. Claude runs with `--tools Read --allowedTools Read` (it can read, not write, move or run anything), `--strict-mcp-config` with no MCP server (no connectors: no mail, no drive, no web), `--setting-sources project` (no user settings, hooks or permissions), `--no-session-persistence`, and `--add-dir` limited to the inboxes and the preview folder. Its answer is data that the script checks; the worst a crafted document can do is get itself filed in a wrong existing folder or left in the inbox.
-- The server only has read-only mounts: it cannot write into iCloud or the Drive. Only the Mac writes, and it checks every action again: paths must stay inside iCloud or the Drive, the source must be in an inbox, the target never an inbox, and the size must not have changed since the decision.
+- The server reads through read-only mounts and cannot write into iCloud. In the Drive it writes only through `sort.py`'s own calls: a file of an inbox moved into the tree (the destination validated as for the Mac: an existing folder or one new level, a cleaned name, never an inbox; the name checked against Google first, so nothing is overwritten), a doubtful invoice moved into `00 À trier`, or a duplicate sent to the Drive's trash; nothing is deleted for good. Google has no narrower grant than the whole Drive for files the server did not create, so the grant is kept in the server account that runs the sorting and nowhere else.
+- The Mac checks every action again: paths must stay inside iCloud or the Drive, the source must be in an inbox, the target never an inbox, and the size must not have changed since the decision.
 - Server notifications go to a public push service, so they never contain file names.
 - Text extracts (up to 2,500 characters) and unreadable files are sent to Claude: judge whether that suits your documents.
 
 ## Design decisions
 
 - **The model proposes, the script decides.** Rather than letting an agent move files with write tools, Claude only reads and answers in a fixed JSON schema; the script accepts only existing folders (plus one new level), a confidence of at least 0.7, cleaned names and never an overwrite. Doubt means the file stays.
-- **The server decides, the Mac moves** (adopted on 03/11/2026, the owner's idea). Rejected: the server writing into iCloud with rclone, whose iCloud backend is still experimental and whose repeated failures could lock the Apple account; and moving the inbox to the Drive so the server could move files itself, which still needed iCloud writes and a full Drive authorization. The server now needs neither, and only sends instructions. Cost: nothing moves while the Mac sleeps; nothing is lost either.
+- **The server decides, the Mac moves** (adopted on 03/11/2026, the owner's idea), **and the server files the Drive itself** (the owner's decision the same afternoon). One inbox in the Drive, which the phone and the Mac both reach: editable documents stay in the Drive and are filed there by the server, even with the Mac asleep; finished documents go to iCloud, the archive, through the Mac. Rejected: the server writing into iCloud with rclone, whose iCloud backend is still experimental and whose repeated failures could lock the Apple account. Cost: a grant on the whole Drive on the server (see Security), and finished documents still wait for the Mac.
+- **Downloads: documents only, 50 MB at most.** Everything poured into the Drive is uploaded, and a finished document comes back down when the Mac files it in iCloud: installers, archives and videos have no place in the archive, and a big file would cost two transfers for nothing. They stay in Downloads, never deleted by the sorting, and the dashboard lists them after a week.
 - **Idempotent plan.** Action ids come from the content (type, path, size); the Mac remembers applied ids for 7 days (`applied.json`), so a plan fetched twice is applied once; the server drops actions never returned within a week and remembers handled sources for an hour, because the mounts show changes a few minutes late.
 - **`kept.json` signatures differ by machine**: `name|size|mtime` on the Mac, `name|size` on the server, because a file the Mac moves keeps its name and size but not its date.
-- **Downloads go through `00 À trier`.** The server cannot see the Mac's Downloads; pouring them into the iCloud inbox keeps one place where decisions are made.
+- **Downloads go through the Drive's `00 À trier`.** The server cannot see the Mac's Downloads; pouring them into the single inbox keeps one place where decisions are made.
 - **Duplicates by size, then SHA-1**: only files of the same size are hashed, which keeps the walk of iCloud cheap.
 - **One lock per data folder**: a pass that finds another running exits; `--deposit` waits for the lock, so a report is never lost.
 - **Haiku, 15 files per call**: cheap and fast enough for a pass every 5 minutes; a pass loops until the inboxes are empty.

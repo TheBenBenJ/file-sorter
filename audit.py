@@ -2,8 +2,9 @@
 """Tidiness audit, without AI: counts what is not tidy in iCloud and the Drive.
 
 Writes tidiness-state.json (read by the Dashboard): loose files next to subfolders,
-names outside the convention, files lying in « 00 À trier » for more than 7 days.
-Reads names and dates only: nothing is downloaded or modified.
+names outside the convention, files lying in « 00 À trier » for more than 7 days, and what the sorting
+left in ~/Downloads (not a document, or too big for the Drive) for more than 7 days.
+Reads names and dates only: nothing is downloaded, modified or deleted.
 """
 import json, os, re, time, unicodedata
 from datetime import datetime
@@ -15,6 +16,7 @@ ROOTS = {
     "iCloud": os.path.join(HOME, "Library/Mobile Documents/com~apple~CloudDocs"),
     "Drive": os.path.join(HOME, SETTINGS["drive"]),
 }
+DOWNLOADS = os.path.join(HOME, "Downloads")
 OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tidiness-state.json")
 
 # intended exceptions (see the rangement-cloud skill)
@@ -54,9 +56,17 @@ def audit():
             if rel == "." and fs:
                 loose += [f"{label}/{f}" for f in fs]
             names += [f"{label}/{rel}/{f}" for f in fs if SUSPECT_NAME.search(f)]
-    # the keys are read by the Dashboard: they stay as they are
+    downloads = []   # left there by sort.py: Benjamin keeps or deletes them himself
+    for f in sorted(os.listdir(DOWNLOADS)) if os.path.isdir(DOWNLOADS) else []:
+        try:
+            st = os.stat(os.path.join(DOWNLOADS, f))
+        except OSError:
+            continue
+        if not f.startswith(".") and now - max(st.st_mtime, st.st_ctime) > STALE_AFTER:
+            downloads.append(f"Téléchargements/{f}")
+    # the keys are read by the Dashboard: they stay as they are (French, like the others)
     return {"date": datetime.now().isoformat(timespec="minutes"), "vrac": loose, "noms": names, "a_trier_vieux": stale,
-            "total": len(set(loose) | set(names) | set(stale))}
+            "telechargements_vieux": downloads, "total": len(set(loose) | set(names) | set(stale) | set(downloads))}
 
 
 if __name__ == "__main__":
@@ -64,4 +74,5 @@ if __name__ == "__main__":
     tmp = OUTPUT + ".tmp"
     json.dump(state, open(tmp, "w"), ensure_ascii=False, indent=1)
     os.replace(tmp, OUTPUT)
-    print(f"{state['total']} file(s) to review: {len(state['vrac'])} loose, {len(state['noms'])} badly named, {len(state['a_trier_vieux'])} in À trier for more than 7 days")
+    print(f"{state['total']} file(s) to review: {len(state['vrac'])} loose, {len(state['noms'])} badly named, {len(state['a_trier_vieux'])} in À trier "
+          f"and {len(state['telechargements_vieux'])} in Downloads for more than 7 days")
