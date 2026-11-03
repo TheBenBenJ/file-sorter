@@ -1,14 +1,20 @@
-# Tout ce qui décrit une personne reste ici : voir les *.exemple.*
+# Personal files stay out of this public repo: copy the *.exemple.* files to create yours.
 reglages.json
 regles.md
 convention.md
+# Apps Script source: personal Gmail queries and Drive folder id, deployed by hand in Google
+gmail-factures.gs
+# State and data written by the scripts
 gardes.json
 etat-rangement.json
-gmail-factures.gs
-donnees/
-tri.lock
-__pycache__/
-.DS_Store
+etat-tva.json
 tri-plan.json
 tri-resultats.json
 tri-appliques.json
+tri.lock
+donnees/
+# temporary files of atomic writes (ours and the Mac relay's)
+*.tmp
+.*.relay
+__pycache__/
+.DS_Store
