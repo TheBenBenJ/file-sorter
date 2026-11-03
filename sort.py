@@ -17,7 +17,7 @@ Paths: FILE_SORTER_ICLOUD, FILE_SORTER_DRIVE, FILE_SORTER_DATA (plan, results, f
 FILE_SORTER_INBOX, FILE_SORTER_DRIVE_INBOX and FILE_SORTER_ATTACHMENTS_INBOX replace the inboxes for a trial, FILE_SORTER_MODEL the model (haiku),
 FILE_SORTER_DOWNLOADS_MAX_MB the largest download poured into the Drive (50).
 """
-import fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, unicodedata
+import atexit, fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, unicodedata
 from datetime import datetime
 HOME = os.path.expanduser("~")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +49,7 @@ OFFICE = (".docx", ".doc", ".odt", ".xlsx", ".xls", ".ods", ".pptx", ".ppt", ".o
 DOCUMENTS = OFFICE + (".pdf", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff", ".rtf",
                       ".pages", ".numbers", ".key", ".txt", ".csv", ".md")   # what Downloads pours into the Drive; the rest stays there
 PREVIEWS = tempfile.mkdtemp(prefix="file-sorter-")
+atexit.register(shutil.rmtree, PREVIEWS, ignore_errors=True)   # one folder per pass: removed when the pass ends
 PARTIAL_EXT = (".crdownload", ".download", ".part", ".partial", ".tmp", ".opdownload")
 MAX_SIZE = int(os.environ.get("FILE_SORTER_DOWNLOADS_MAX_MB", "50")) * 1024 * 1024   # above this, a download stays in Downloads
 LOG = os.path.join(HOME, "Library/Logs/file-sorter.log") if MAC else None   # elsewhere: standard output, kept by the service's journal
