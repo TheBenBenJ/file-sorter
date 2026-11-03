@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """Renames existing iCloud documents according to convention.md.
 
-  renommer.py plan       -> proposes names (Claude), writes plan-renommage.json + .tsv, touches nothing
-  renommer.py appliquer  -> applies the plan, undo journal in annulation-renommage.json
-  renommer.py annuler    -> restores the old names
-Environment: RACINE (another folder than iCloud, e.g. the Drive), SUFFIXE (separate plan and undo files, e.g. "-drive"),
-EXCLUS (folders to skip, separated by "|"), DOCS_SEULEMENT (rename documents only).
+  rename.py plan [<folder prefix>]  -> proposes names (Claude), writes data/rename-plan.json + .tsv, touches nothing
+  rename.py apply                   -> applies the plan, undo journal in data/rename-undo.json
+  rename.py undo                    -> restores the old names
+Environment: ROOT (another folder than iCloud, e.g. the Drive), SUFFIX (separate plan and undo files, e.g. "-drive"),
+EXCLUDED (folders to skip, separated by "|"), DOCS_ONLY (rename documents only).
 """
 import concurrent.futures, hashlib, json, os, subprocess, sys, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import tri  # reuses the extraction, the Claude settings and the convention
+import sort  # reuses the extraction, the Claude settings and the convention
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SUFFIX = os.environ.get("SUFFIXE", "")            # e.g. "-drive": separate plan and undo files
-PLAN = os.path.join(HERE, "donnees", f"plan-renommage{SUFFIX}.json")
-UNDO = os.path.join(HERE, "donnees", f"annulation-renommage{SUFFIX}.json")
-ROOT = os.path.expanduser(os.environ.get("RACINE", tri.ICLOUD))   # iCloud by default, or another folder (Drive)
-EXCLUDED = tuple(os.environ["EXCLUS"].split("|")) if os.environ.get("EXCLUS") else ("00 À trier", "80 Images")
+SUFFIX = os.environ.get("SUFFIX", "")             # e.g. "-drive": separate plan and undo files
+PLAN = os.path.join(HERE, "data", f"rename-plan{SUFFIX}.json")
+UNDO = os.path.join(HERE, "data", f"rename-undo{SUFFIX}.json")
+ROOT = os.path.expanduser(os.environ.get("ROOT", sort.ICLOUD))   # iCloud by default, or another folder (Drive)
+EXCLUDED = tuple(os.environ["EXCLUDED"].split("|")) if os.environ.get("EXCLUDED") else ("00 À trier", "80 Images")
 DOCS = (".pdf", ".doc", ".docx", ".odt", ".ppt", ".pptx", ".jpg", ".jpeg", ".png", ".heic", ".txt", ".rtf", ".mp4", ".mov", ".kmz")
-DOCS_ONLY = bool(os.environ.get("DOCS_SEULEMENT"))   # Drive: rename documents only
+DOCS_ONLY = bool(os.environ.get("DOCS_ONLY"))   # Drive: rename documents only
 CODE_MARKERS = {"package.json", "composer.json", "pom.xml", "build.gradle", ".git", "angular.json", "Makefile", ".idea", "src", "app", "www", "vendor", "node_modules"}
 BUNDLES = ("_files", "kit-de-modeles", "retours-recette")   # folders whose files reference each other
 BATCH = 20
@@ -49,32 +49,32 @@ def propose(rel, files):
     # The prompt stays in French: the convention it applies produces French names.
     blocks = []
     for p in files:
-        tri.materialize(p)
-        txt = tri.extract(p)
+        sort.materialize(p)
+        txt = sort.extract(p)
         name = os.path.basename(p)
         blocks.append(f"### {name}\n" + (f"Extrait :\n{txt}" if txt else "(pas de texte : déduis du nom, ou lis-le avec Read si c'est un PDF ou une image : " + p + ")"))
-    prompt = f"""Renomme les fichiers du dossier "{rel}" (documents de {tri.SETTINGS['proprietaire']}) selon cette convention :
+    prompt = f"""Renomme les fichiers du dossier "{rel}" (documents de {sort.SETTINGS['proprietaire']}) selon cette convention :
 
-{tri.CONVENTION}
+{sort.CONVENTION}
 Le dossier donne le thème : ne répète pas son nom dans le fichier sauf si c'est l'émetteur.
 Si le nom respecte déjà la convention, renvoie-le à l'identique. N'invente pas de date : prends-la dans le contenu ou dans le nom actuel, sinon utilise la forme sans date.
 Le champ "fichier" reprend EXACTEMENT le nom donné après "###". Réponds pour chaque fichier.
 
 {chr(10).join(blocks)}
 """
-    cmd = [tri.CLAUDE, "-p", prompt, "--model", tri.MODEL, "--output-format", "json",
+    cmd = [sort.CLAUDE, "-p", prompt, "--model", sort.MODEL, "--output-format", "json",
            "--json-schema", json.dumps(SCHEMA), "--tools", "Read", "--allowedTools", "Read",
            "--add-dir", ROOT, "--strict-mcp-config", "--setting-sources", "project", "--no-session-persistence"]
     env = dict(os.environ, PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, cwd=tempfile.gettempdir(), env=env)
     data = json.loads(r.stdout)
     res = data.get("structured_output") or json.loads(data["result"])
-    by = {tri.re.sub(r"[^0-9a-z]", "", tri.unicodedata.normalize("NFKD", os.path.basename(p)).lower()): p for p in files}
+    by = {sort.re.sub(r"[^0-9a-z]", "", sort.unicodedata.normalize("NFKD", os.path.basename(p)).lower()): p for p in files}
     out = []
     for d in res["fichiers"]:
-        src = by.get(tri.re.sub(r"[^0-9a-z]", "", tri.unicodedata.normalize("NFKD", d["fichier"]).lower()))
+        src = by.get(sort.re.sub(r"[^0-9a-z]", "", sort.unicodedata.normalize("NFKD", d["fichier"]).lower()))
         if src:
-            new = tri.clean_name(d["nouveau_nom"], os.path.basename(src))
+            new = sort.clean_name(d["nouveau_nom"], os.path.basename(src))
             out.append({"de": os.path.relpath(src, ROOT), "vers": os.path.join(rel, new)})
     return out
 
@@ -132,7 +132,7 @@ def apply():
             if os.path.exists(a) and os.path.exists(b):
                 losers.add(e["de"] if os.path.getmtime(a) < os.path.getmtime(b) else e["collision_avec"])
     for rel in losers:
-        tri.to_trash(os.path.join(ROOT, rel))
+        sort.to_trash(os.path.join(ROOT, rel))
         undo_log.append({"corbeille": rel})
     for e in res:
         if e["de"] in losers:
@@ -143,13 +143,13 @@ def apply():
         if not os.path.exists(src):
             continue
         if e.get("doublon_exact"):
-            tri.to_trash(src)
+            sort.to_trash(src)
             undo_log.append({"corbeille": e["de"]})
             continue
         dst = os.path.join(ROOT, e["vers"])
-        same = lambda x: tri.unicodedata.normalize("NFC", x).lower()
+        same = lambda x: sort.unicodedata.normalize("NFC", x).lower()
         if same(dst) != same(src):   # a mere change of case or accents: not a conflict
-            dst = tri.unique(dst)
+            dst = sort.unique(dst)
         os.rename(src, dst)
         undo_log.append({"de": e["de"], "vers": os.path.relpath(dst, ROOT)})
     json.dump(undo_log, open(UNDO, "w"), ensure_ascii=False, indent=1)
@@ -164,5 +164,4 @@ def undo():
 
 
 if __name__ == "__main__":
-    # the command words stay French: the rangement-cloud skill and the owner's habits use them
-    {"plan": plan, "appliquer": apply, "annuler": undo}[sys.argv[1]](*sys.argv[2:])
+    {"plan": plan, "apply": apply, "undo": undo}[sys.argv[1]](*sys.argv[2:])

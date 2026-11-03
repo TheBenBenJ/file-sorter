@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Applies a tidying plan (JSON produced by the audit of a folder) in iCloud.
 
-  appliquer-plan.py verifier plan.json [plan2.json …]   -> checks, touches nothing
-  appliquer-plan.py appliquer plan.json [plan2.json …]  -> moves / renames / sends to the Trash, writes an undo journal
-  appliquer-plan.py annuler journal.json                -> puts the moved files back
-RACINE=<folder> works on another root than iCloud (the Drive, for example).
+  apply_plan.py verify tidy-plan.json [tidy-plan2.json …]  -> checks, touches nothing
+  apply_plan.py apply tidy-plan.json [tidy-plan2.json …]   -> moves / renames / sends to the Trash, writes an undo journal in data/
+  apply_plan.py undo data/undo-tidy-<date>.json           -> puts the moved files back
+ROOT=<folder> works on another root than iCloud (the Drive, for example).
 """
 import json, os, shutil, subprocess, sys, unicodedata
 from datetime import datetime
 
-ROOT = os.path.expanduser(os.environ.get("RACINE", "~/Library/Mobile Documents/com~apple~CloudDocs"))   # RACINE=… for the Drive
+ROOT = os.path.expanduser(os.environ.get("ROOT", "~/Library/Mobile Documents/com~apple~CloudDocs"))   # ROOT=… for the Drive
 HERE = os.path.dirname(os.path.abspath(__file__))
 nfc = lambda s: unicodedata.normalize("NFC", s)
 
@@ -72,7 +72,7 @@ def to_trash(p):
 
 
 def apply_ops(ops):
-    journal = []   # undo journal; its French keys (corbeille, de, vers) are read back by `annuler`
+    journal = []   # undo journal; its French keys (corbeille, de, vers) are read back by `undo`
     # 1. Trash, 2. moves through a temporary name (avoids conflicts when two names are swapped)
     for o in ops:
         if o["op"] == "trash":
@@ -86,7 +86,7 @@ def apply_ops(ops):
             p = find(o["src"])
             if not p:
                 continue
-            t = p + f".deplacement-{i}"
+            t = p + f".moving-{i}"
             os.rename(p, t)
             temp.append((t, o))
     for t, o in temp:
@@ -103,7 +103,7 @@ def apply_ops(ops):
             if os.path.exists(os.path.join(r, ".DS_Store")):
                 os.remove(os.path.join(r, ".DS_Store"))
             os.rmdir(r)
-    name = os.path.join(HERE, "donnees", f"annulation-rangement-{datetime.now():%Y%m%d-%H%M%S}.json")
+    name = os.path.join(HERE, "data", f"undo-tidy-{datetime.now():%Y%m%d-%H%M%S}.json")
     json.dump(journal, open(name, "w"), ensure_ascii=False, indent=1)
     print(f"{sum('vers' in j for j in journal)} moved/renamed, {sum('corbeille' in j for j in journal)} sent to the Trash; undo: {name}")
 
@@ -118,9 +118,10 @@ def undo(journal):
 
 
 if __name__ == "__main__":
-    # the command words stay French: the rangement-cloud skill uses them
     command, args = sys.argv[1], sys.argv[2:]
-    if command == "annuler":
+    if command not in ("verify", "apply", "undo"):   # anything else would only check, and look like a success
+        sys.exit("usage: apply_plan.py verify|apply <plan.json>… | undo <journal.json>")
+    if command == "undo":
         undo(args[0])
         sys.exit()
     ops = load(args)
@@ -128,7 +129,7 @@ if __name__ == "__main__":
     print(f"{len(ops)} operations, {len(errors)} problem(s)")
     for e in errors:
         print("  ", e)
-    if command == "appliquer":
+    if command == "apply":
         if errors:
             sys.exit("plan refused: fix it first")
         apply_ops(ops)

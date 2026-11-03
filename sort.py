@@ -4,11 +4,11 @@ Claude (CLI, Read tool only) proposes a destination for each file;
 this script validates it and moves the file. Nothing is ever overwritten; when in doubt, the file stays.
 
 Ways to run it:
-  tri.py [--dry-run]   everything on the Mac: decide and move (the original mode)
-  tri.py --decider     on a server where iCloud and the Drive are mounted read-only: decides, moves nothing,
-                       writes tri-plan.json (ranger, vers_a_trier, doublon); tri-resultats.json, returned by the Mac, removes what is done
-  tri.py --appliquer   on the Mac: applies tri-plan.json received from the server, pours ~/Downloads into 00 À trier, writes tri-resultats.json
-  tri.py --deposer <icloud|drive> <path> <file>   on the server: hands the Mac a document to write there (the VAT check report, for example)
+  sort.py [--dry-run]  everything on the Mac: decide and move (the original mode)
+  sort.py --decide     on a server where iCloud and the Drive are mounted read-only: decides, moves nothing,
+                       writes plan.json (ranger, vers_a_trier, doublon); results.json, returned by the Mac, removes what is done
+  sort.py --apply      on the Mac: applies plan.json received from the server, pours ~/Downloads into 00 À trier, writes results.json
+  sort.py --deposit <icloud|drive> <path> <file>   on the server: hands the Mac a document to write there (the VAT check report, for example)
 Paths: FILE_SORTER_ICLOUD, FILE_SORTER_DRIVE, FILE_SORTER_DATA (plan, results, files left in place), FILE_SORTER_CLAUDE; the defaults are the Mac's.
 FILE_SORTER_INBOX replaces the inbox for a trial, FILE_SORTER_MODEL the model (haiku).
 """
@@ -16,27 +16,27 @@ import fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, un
 from datetime import datetime
 HOME = os.path.expanduser("~")
 HERE = os.path.dirname(os.path.abspath(__file__))
-with open(os.path.join(HERE, "reglages.json"), encoding="utf-8") as f:
-    SETTINGS = json.load(f)   # identity and personal paths, kept out of the repo (see reglages.exemple.json)
+with open(os.path.join(HERE, "settings.json"), encoding="utf-8") as f:
+    SETTINGS = json.load(f)   # identity and personal paths, kept out of the repo (see settings.example.json)
 MAC = sys.platform == "darwin"
-ROLE = "decide" if "--decider" in sys.argv else "apply" if "--appliquer" in sys.argv else "deposit" if "--deposer" in sys.argv else "full"
+ROLE = "decide" if "--decide" in sys.argv else "apply" if "--apply" in sys.argv else "deposit" if "--deposit" in sys.argv else "full"
 ICLOUD = os.environ.get("FILE_SORTER_ICLOUD") or os.path.join(HOME, "Library/Mobile Documents/com~apple~CloudDocs")
 DRIVE = os.environ.get("FILE_SORTER_DRIVE") or os.path.join(HOME, SETTINGS["drive"])
 DATA = os.environ.get("FILE_SORTER_DATA") or HERE
 INBOX = os.environ.get("FILE_SORTER_INBOX") or os.path.join(ICLOUD, "00 À trier")   # FILE_SORTER_INBOX: another inbox, for a trial
 DOWNLOADS = os.path.join(HOME, "Downloads")
-GMAIL_INBOX = os.path.join(DRIVE, "00 Factures entrantes")  # filled by gmail-factures.gs
+GMAIL_INBOX = os.path.join(DRIVE, "00 Factures entrantes")  # filled by gmail-invoices.gs
 EXTERNAL = (DOWNLOADS, GMAIL_INBOX)   # sources outside iCloud: a doubtful file goes to 00 À trier
 OFFICE = (".docx", ".doc", ".odt", ".xlsx", ".xls", ".ods")   # editable: they go to the Drive, same tree, converted to Google Docs/Sheets by the Apps Script
 PREVIEWS = tempfile.mkdtemp(prefix="file-sorter-")
 PARTIAL_EXT = (".crdownload", ".download", ".part", ".partial", ".tmp", ".opdownload")
 MAX_SIZE = 500 * 1024 * 1024   # above this, the file stays in Downloads (dumps...)
 LOG = os.path.join(HOME, "Library/Logs/file-sorter.log") if MAC else None   # elsewhere: standard output, kept by the service's journal
-LOCK = os.path.join(DATA, "tri.lock")
-KEPT = os.path.join(DATA, "gardes.json")   # files left in place, not to be asked about again
-PLAN = os.path.join(DATA, "tri-plan.json")
-RESULTS = os.path.join(DATA, "tri-resultats.json")
-APPLIED = os.path.join(DATA, "tri-appliques.json")   # Mac: actions already applied, kept 7 days
+LOCK = os.path.join(DATA, "sort.lock")
+KEPT = os.path.join(DATA, "kept.json")   # files left in place, not to be asked about again
+PLAN = os.path.join(DATA, "plan.json")
+RESULTS = os.path.join(DATA, "results.json")
+APPLIED = os.path.join(DATA, "applied.json")   # Mac: actions already applied, kept 7 days
 CLAUDE = os.environ.get("FILE_SORTER_CLAUDE") or "/opt/homebrew/bin/claude"
 MODEL = os.environ.get("FILE_SORTER_MODEL", "haiku")
 MIN_AGE = 60          # seconds without modification before a file is handled
@@ -204,7 +204,7 @@ SCHEMA = {
 
 
 CONVENTION = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "convention.md")).read()
-RULES = open(os.path.join(HERE, "regles.md"), encoding="utf-8").read().strip()
+RULES = open(os.path.join(HERE, "rules.md"), encoding="utf-8").read().strip()
 
 
 def jpeg_preview(p, jpg):
@@ -403,7 +403,7 @@ def main():
 
 def audit():
     """Tidiness state for the Dashboard (no AI, names and dates only)."""
-    subprocess.run([sys.executable, "-I", os.path.join(os.path.dirname(os.path.abspath(__file__)), "audit-rangement.py")], capture_output=True, timeout=300)
+    subprocess.run([sys.executable, "-I", os.path.join(os.path.dirname(os.path.abspath(__file__)), "audit.py")], capture_output=True, timeout=300)
 
 
 def batch(files, moved, kept):
@@ -431,7 +431,7 @@ def batch(files, moved, kept):
 
 
 # ---- decision on the server, move on the Mac ----
-# tri-plan.json and tri-resultats.json are exchanged between the server and the Mac: their French keys
+# plan.json and results.json are exchanged between the server and the Mac: their French keys
 # (actions, faites, appliques, racine, chemin, taille, cible, cree_le...), action types and statuses are a contract.
 
 def relative(p):
@@ -449,7 +449,7 @@ def make_action(kind, src, **extra):
 
 def decide():
     """Server: decides for the inboxes (iCloud 00 À trier, Drive 00 Factures entrantes) without moving anything.
-    tri-plan.json keeps the actions the Mac has not returned yet; a source already planned or just handled is not asked about again."""
+    plan.json keeps the actions the Mac has not returned yet; a source already planned or just handled is not asked about again."""
     lock = open(LOCK, "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -493,7 +493,7 @@ def decide():
 
 
 def apply_plan():
-    """Mac: applies tri-plan.json received from the server, pours ~/Downloads into 00 À trier, writes tri-resultats.json (what was done, or why not)."""
+    """Mac: applies plan.json received from the server, pours ~/Downloads into 00 À trier, writes results.json (what was done, or why not)."""
     lock = open(LOCK, "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -530,7 +530,7 @@ def apply_plan():
 def apply_action(a, moved, kept):
     """One action of the plan, after checks: paths inside iCloud or the Drive, source in an inbox, size unchanged.
     Returns the status to send back to the server, or None to retry on the next pass (file not downloaded yet).
-    The statuses and the error messages below stay in French: they go back to the server in tri-resultats.json."""
+    The statuses and the error messages below stay in French: they go back to the server in results.json."""
     roots = {"icloud": ICLOUD, "drive": DRIVE}
     def resolve(c):
         base = roots[c["racine"]]
@@ -581,7 +581,7 @@ def apply_action(a, moved, kept):
 
 def deposit():
     """Server: adds to the plan a document for the Mac to write ("deposer" action), waiting if needed for a running decision to finish."""
-    i = sys.argv.index("--deposer")
+    i = sys.argv.index("--deposit")
     root, rel, source_file = sys.argv[i + 1:i + 4]
     if root not in ("icloud", "drive") or rel.startswith("00 ") or ".." in rel.split("/"):
         sys.exit("destination refused")
@@ -619,4 +619,11 @@ def move_downloads():
 
 
 if __name__ == "__main__":
+    # an unknown or former option stops here: falling back to the full mode would decide and move files
+    args = sys.argv[1:]
+    if "--deposit" in args:
+        args = args[:args.index("--deposit") + 1] + args[args.index("--deposit") + 4:]
+    unknown = [a for a in args if a not in ("--dry-run", "--decide", "--apply", "--deposit")]
+    if unknown:
+        sys.exit(f"unknown argument {unknown[0]}: sort.py [--dry-run] | --decide | --apply | --deposit <icloud|drive> <path> <file>")
     {"decide": decide, "apply": apply_plan, "deposit": deposit}.get(ROLE, main)()

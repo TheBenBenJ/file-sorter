@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tidiness audit, without AI: counts what is not tidy in iCloud and the Drive.
 
-Writes etat-rangement.json (read by the Dashboard): loose files next to subfolders,
+Writes tidiness-state.json (read by the Dashboard): loose files next to subfolders,
 names outside the convention, files lying in « 00 À trier » for more than 7 days.
 Reads names and dates only: nothing is downloaded or modified.
 """
@@ -9,13 +9,13 @@ import json, os, re, time, unicodedata
 from datetime import datetime
 
 HOME = os.path.expanduser("~")
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "reglages.json"), encoding="utf-8") as f:
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json"), encoding="utf-8") as f:
     SETTINGS = json.load(f)
 ROOTS = {
     "iCloud": os.path.join(HOME, "Library/Mobile Documents/com~apple~CloudDocs"),
     "Drive": os.path.join(HOME, SETTINGS["drive"]),
 }
-OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "etat-rangement.json")
+OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tidiness-state.json")
 
 # intended exceptions (see the rangement-cloud skill)
 BUNDLES = tuple(SETTINGS["paquets"])
