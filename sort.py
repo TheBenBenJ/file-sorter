@@ -14,13 +14,18 @@ Ways to run it:
                        Drive's 00 À trier, writes results.json
   sort.py --deposit <icloud|drive> <path> <file>   on the server: hands the Mac a document to write there (the VAT check report, for example)
 Paths: FILE_SORTER_ICLOUD, FILE_SORTER_DRIVE, FILE_SORTER_DATA (plan, results, files left in place), FILE_SORTER_CLAUDE; the defaults are the Mac's.
+With --decide, every decision and action, the server's and the Mac's (read back from results.json), goes to activity.jsonl, and each step of
+the pass to run-status.json, both in FILE_SORTER_DATA, for the home server's Dashboard (activity.py); the Mac writes neither.
 FILE_SORTER_INBOX, FILE_SORTER_DRIVE_INBOX and FILE_SORTER_ATTACHMENTS_INBOX replace the inboxes for a trial, FILE_SORTER_MODEL the model (haiku),
-FILE_SORTER_DOWNLOADS_MAX_MB the largest download poured into the Drive (50).
+FILE_SORTER_DOWNLOADS_MAX_MB the largest download poured into the Drive (50), FILE_SORTER_MIN_AGE the seconds a file must stay unchanged
+before it is handled (60; tests.py sets 0).
 """
-import atexit, fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, unicodedata
+import atexit, fcntl, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, time, unicodedata
 from datetime import datetime
 HOME = os.path.expanduser("~")
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)   # python3 -I leaves the script's folder out of the import path
+import activity  # noqa: E402
 with open(os.path.join(HERE, "settings.json"), encoding="utf-8") as f:
     SETTINGS = json.load(f)   # identity and personal paths, kept out of the repo (see settings.example.json)
 MAC = sys.platform == "darwin"
@@ -60,10 +65,16 @@ RESULTS = os.path.join(DATA, "results.json")
 APPLIED = os.path.join(DATA, "applied.json")   # Mac: actions already applied, kept 7 days
 CLAUDE = os.environ.get("FILE_SORTER_CLAUDE") or "/opt/homebrew/bin/claude"
 MODEL = os.environ.get("FILE_SORTER_MODEL", "haiku")
-MIN_AGE = 60          # seconds without modification before a file is handled
+MIN_AGE = int(os.environ.get("FILE_SORTER_MIN_AGE", "60"))   # seconds without modification before a file is handled
 MAX_FILES = 15        # per pass
 THRESHOLD = 0.7       # minimum confidence to move a file
 DRY = "--dry-run" in sys.argv
+# The Dashboard's activity journal and step report (activity.py): written by the server's pass only, the single writer
+STEPS = ("inboxes", "decide", "drive", "plan", "icloud")   # the steps of file-sorting's workflow in the home server's registry
+if ROLE == "decide":
+    activity.PATH = os.path.join(DATA, "activity.jsonl")
+REPORT = activity.Report(os.path.join(DATA, "run-status.json") if ROLE == "decide" else None, STEPS)
+UNREADABLE = []   # the inboxes that could not be listed during this pass
 TEXT_EXT = {".txt", ".csv", ".ics", ".md", ".json", ".html", ".htm", ".xml"}
 TEXTUTIL_EXT = {".doc", ".docx", ".rtf", ".odt", ".pages"}
 VISION_EXT = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".gif"}
@@ -71,6 +82,7 @@ nfc = lambda s: unicodedata.normalize("NFC", s)
 
 # Log lines start with a French keyword (RANGÉ, GARDÉ, DOUBLON, DÉPOSÉ, VERSÉ, LAISSÉ, PLAN, MAC, ERREUR, SANS RÉPONSE, ATTENTE, TROP GROS,
 # À DÉPOSER): docs and habits grep the journals for them, so they stay as they are. Notifications stay in French too: the owner reads them.
+# So do the actions and texts of the activity journal (« rangé », « renommé », « doublon », « gardé », « à trier »...): the Dashboard shows them.
 
 
 def log(msg):
@@ -166,6 +178,7 @@ def pending(sources, skip=lambda p: False):
             entries = sorted(os.listdir(src)) if os.path.isdir(src) else []
         except OSError as e:   # Drive/iCloud folder being synced (EDEADLK): retried on the next pass, without an alert
             log(f"ATTENTE source unreadable for now: {os.path.basename(src)} ({e.strerror})")
+            UNREADABLE.append(where(src))
             continue
         for f in entries:
             p = os.path.join(src, f)
@@ -387,12 +400,14 @@ def choose(files):
         if new == name and not keeps_name and os.path.dirname(src) == ATTACH_INBOX:
             # an exported attachment's name never follows the convention: no name proposed means the model meant something else
             # (a copy of another document of the batch, to throw away, which the answer cannot say): the file stays in its inbox
-            choices.append((src, None, name, conf, d))
+            choices.append((src, None, name, conf, {**d, "_copy": True}))
             continue
         choices.append((src, dest, new, conf, d))
     for p in files:
         if p not in answered:
             log(f"SANS RÉPONSE {os.path.basename(p)}  (retried on the next pass)")
+            activity.log("sans réponse", os.path.basename(p), src=where(os.path.dirname(p)), engine="claude", model=MODEL,
+                         detail="le modèle n'a rien répondu pour ce fichier : nouvel essai au prochain passage")
     return choices
 
 
@@ -517,80 +532,227 @@ def drive_move(src, folder, name):
     return target
 
 
+# ---- the activity journal and the step report (activity.py): what the server decided and did, and what the Mac did ----
+
+def place(root, rel=""):
+    """A place as the owner reads it: "Google Drive/…" or "iCloud/…"."""
+    return f"{'Google Drive' if root == 'drive' else 'iCloud'}/{rel}".rstrip("/")
+
+
+def where(p):
+    """The place of a path inside iCloud or the Drive."""
+    return place(*relative(p))
+
+
+def twin(orig):
+    """The original of a duplicate, which dedupe gives relative to iCloud, as a place."""
+    return where(os.path.normpath(os.path.join(ICLOUD, orig)))
+
+
+def kept_why(conf, d):
+    """Why a file stays where it is, for the journal."""
+    if d.get("_copy"):
+        why = "pièce jointe sans nouveau nom proposé : sans doute la copie d'un autre document"
+    elif conf < THRESHOLD:
+        why = f"pas assez sûr ({round(conf * 100)} %, il faut {round(THRESHOLD * 100)} %)"
+    else:
+        why = "dossier proposé hors de l'arborescence"
+    proposed = d.get("destination")
+    return f"{why} ; proposait « {proposed} »" + (f" : {d['raison']}" if d.get("raison") else "") if proposed else why
+
+
+def filed(name, origin, target, d, ai, how):
+    """The events of a filing: « rangé », then « renommé » when the name changes. target: the new place, name included."""
+    events = [("rangé", name, {"src": origin, "dst": target, "detail": " ; ".join(str(x) for x in (d.get("raison"), how) if x), **ai})]
+    new = target.rsplit("/", 1)[-1]
+    if nfc(new) != nfc(name):
+        events.append(("renommé", name, {"src": name, "dst": new, "detail": "nom refait selon la convention", **ai}))
+    return events
+
+
+MAC_DONE = {"ranger": "rangé par le Mac", "doublon": "doublon jeté par le Mac", "vers_a_trier": "mis à trier par le Mac", "deposer": "déposé par le Mac"}
+MAC_VERB = {"ranger": "le ranger", "doublon": "le mettre à la Corbeille", "vers_a_trier": "le mettre dans 00 À trier", "deposer": "l'écrire"}
+MAC_FINE = ("ok", "absent", "modifié depuis la décision")   # the Mac's statuses that are no failure
+DRIVE_WHAT = {"doublon": "mise à la corbeille du Drive", "vers 00 À trier": "déplacement vers 00 À trier", "rangement": "rangement dans le Drive"}
+
+
+def mac_event(a, status):
+    """The journal's event for an action of the plan the Mac reports on in results.json: (action, object, fields)."""
+    try:
+        return _mac_event(a, str(status))
+    except Exception:   # a malformed action or status must not stop the pass
+        return "fait par le Mac", str(a.get("id", "?")), {"detail": str(status)}
+
+
+def _mac_event(a, status):
+    kind, src, target = a.get("type"), a.get("source") or {}, a.get("cible")
+    if kind == "deposer":
+        obj, fields = os.path.basename(target["chemin"]), {"src": "serveur", "dst": place(target["racine"], target["chemin"])}
+    else:
+        obj = os.path.basename(src.get("chemin", ""))
+        fields = {"src": place(src.get("racine"), os.path.dirname(src.get("chemin", ""))),
+                  "dst": place(target["racine"], target["chemin"]) if target else "Corbeille du Mac" if kind == "doublon" else where(DRIVE_INBOX)}
+    if status == "ok":
+        return MAC_DONE.get(kind, "fait par le Mac"), obj, {**fields, "detail": f"identique à {twin(a['original'])}" if a.get("original") else None}
+    if status in MAC_FINE:
+        return "annulé", obj, {**fields, "detail": "le Mac ne l'a plus trouvé : déplacé ou supprimé entre-temps" if status == "absent"
+                               else "modifié depuis la décision : il sera examiné de nouveau"}
+    error = status.removeprefix("erreur : ")
+    return "échec", obj, {**fields, "detail": f"le Mac n'a pas pu {MAC_VERB.get(kind, 'appliquer la décision')} : {error}"}
+
+
+def public_reason(e, step):
+    """A failure as the step report shows it: French, without a file name (the journal has the details)."""
+    try:
+        return _public_reason(e, step)
+    except Exception:
+        return f"erreur {type(e).__name__}"
+
+
+def _public_reason(e, step):
+    if isinstance(e, subprocess.TimeoutExpired):
+        program = os.path.basename(str(e.cmd[0] if isinstance(e.cmd, (list, tuple)) else e.cmd))
+        return f"{program} n'a pas répondu en {int(e.timeout // 60)} min" if e.timeout >= 120 else f"{program} n'a pas répondu en {int(e.timeout)} s"
+    found = re.match(r"claude failed \((-?\d+)\)", str(e))
+    if found:
+        return f"Claude a échoué (code {found.group(1)})"
+    if step == "decide" and isinstance(e, (ValueError, KeyError, TypeError, AttributeError)):
+        return "réponse de Claude illisible"
+    if isinstance(e, OSError):
+        return f"erreur système : {e.strerror or type(e).__name__}"
+    return f"erreur {type(e).__name__}"
+
+
+def stopped(signum, frame):
+    """systemd stops the pass (time is over, or the server shuts down): the step it was at fails, then the pass ends."""
+    REPORT.fail("arrêté avant la fin : délai dépassé ou arrêt du serveur")
+    activity.failed("passage du tri", "passage arrêté avant la fin : délai dépassé ou arrêt du serveur")
+    sys.exit(128 + signum)
+
+
 def decide():
     """Server: decides for the inboxes (the Drive's 00 À trier and 00 Factures entrantes, iCloud's 00 À trier, the Drive's 00 Pièces
     jointes). Into iCloud, and out of iCloud, only the Mac moves: plan.json keeps the actions it has not returned yet. Inside the Drive,
     with FILE_SORTER_DRIVE_RCLONE, the server files itself: editable documents into the tree, doubtful invoices into 00 À trier,
-    duplicates to the Drive's trash. A source already planned or just handled is not asked about again."""
+    duplicates to the Drive's trash. A source already planned or just handled is not asked about again.
+    The journal gets each decision and each action (the server's at once, the plan's once plan.json is written, so that a pass that
+    fails before is not logged twice) and what the Mac returned; the step report follows the pass."""
     lock = open(LOCK, "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return
-    failures = []
+    signal.signal(signal.SIGTERM, stopped)
+    failures, in_drive, later = [], [], []   # later: (action, object, fields) of the plan's events
     try:
+        REPORT.running("inboxes")
         plan = read_json(PLAN, {"actions": [], "faites": {}})
         returned = read_json(RESULTS, {}).get("appliques", {})
         done = {k: v for k, v in plan.get("faites", {}).items() if time.time() - v[1] < 3600}   # sources handled, until the mounts show it
-        actions = []
+        actions, came_back = [], []
         for a in plan.get("actions", []):
             if a["id"] in returned:
                 done[f"{a['source']['racine']}|{a['source']['chemin']}"] = [returned[a["id"]], time.time()]
                 log(f"MAC     {a['type']} {a['source']['chemin']} : {returned[a['id']]}")
+                came_back.append(returned[a["id"]])
+                later.append(mac_event(a, returned[a["id"]]))
             elif time.time() - a.get("cree_le", 0) < 7 * 86400:   # an action not returned within a week is dropped
                 actions.append(a)
+        if came_back:
+            errors = sum(status not in MAC_FINE for status in came_back)
+            REPORT.set("icloud", *(("failed", f"le Mac n'a pas pu appliquer {errors} action(s) du plan") if errors else ("ok",)))
+        elif not actions:
+            REPORT.set("icloud", "skipped")   # while the Mac has actions to apply, its step stays without a state
         planned = {f"{a['source']['racine']}|{a['source']['chemin']}" for a in actions} | set(done)
         files = pending((GMAIL_INBOX, DRIVE_INBOX, INBOX, ATTACH_INBOX), skip=lambda p: "|".join(relative(p)) in planned)
         server_side = lambda p: bool(DRIVE_RCLONE) and os.path.dirname(p) in DRIVE_INBOXES
 
         def by_server(p, what, act):   # a move in the Drive done here; a failure is kept for the end of the pass, the file stays
+            REPORT.running("drive")
             try:
                 result = act()
                 done["|".join(relative(p))] = [f"ok (serveur) : {result}", time.time()]
+                in_drive.append(p)
                 return result
             except DriveError as e:
                 failures.append(os.path.basename(p))
                 log(f"ERREUR  {what} {os.path.basename(p)} : {e}")
+                activity.log("échec", os.path.basename(p), src=where(os.path.dirname(p)),
+                             detail=f"{DRIVE_WHAT.get(what, what)} impossible, nouvel essai au prochain passage : {e}")
                 return None
 
+        found, duplicates = bool(files), []
         if files:
             files, duplicates = dedupe(files)
-            for p, orig in duplicates:
-                if server_side(p):
-                    if by_server(p, "doublon", lambda: rclone("deletefile", "--drive-use-trash", DRIVE_RCLONE + os.path.relpath(p, DRIVE)) or "corbeille du Drive"):
-                        log(f"DOUBLON {os.path.basename(p)}  (identical to {orig}) -> the Drive's trash, by the server")
-                else:
-                    actions.append(make_action("doublon", p, original=nfc(orig)))
-                    log(f"DOUBLON {os.path.basename(p)}  (identical to {orig}) -> Trash, by the Mac")
-            if files:
-                for src, dest, new, conf, d in choose(files):
-                    name = os.path.basename(src)
-                    if dest is None:
-                        signature = sig(src)   # before a move: the mount may stop showing the file at once
-                        if os.path.dirname(src) == GMAIL_INBOX:   # a doubtful invoice joins the inbox Benjamin looks at; an attachment stays
-                            if server_side(src):
-                                if not by_server(src, "vers 00 À trier", lambda: drive_move(src, os.path.relpath(DRIVE_INBOX, DRIVE), name)):
-                                    continue
-                            else:
-                                actions.append(make_action("vers_a_trier", src))
-                        save_kept(src, signature)
-                        log(f"GARDÉ   {name}  (confidence {conf:.2f}, proposed: {d.get('destination')}) — {d.get('raison')}")
-                        continue
-                    base = "drive" if name.lower().endswith(OFFICE) else "icloud"
-                    if base == "drive" and server_side(src):
-                        target = by_server(src, "rangement", lambda: drive_move(src, dest, new))
-                        if target:
-                            log(f"RANGÉ   {name}  ->  Drive/{target}  ({conf:.2f}) — {d.get('raison')} (by the server)")
-                        continue
-                    actions.append(make_action("ranger", src, cible={"racine": base, "chemin": nfc(os.path.join(dest, new))}, confiance=conf, raison=d.get("raison", "")))
-                    log(f"PLAN    {name}  ->  {'Drive/' if base == 'drive' else ''}{os.path.join(dest, new)}  ({conf:.2f}) — {d.get('raison')}")
+        REPORT.set("inboxes", *(("failed", "arrivée illisible pour l'instant : " + ", ".join(UNREADABLE)) if UNREADABLE
+                                else ("ok",) if found else ("skipped",)))
+        for p, orig in duplicates:
+            name = os.path.basename(p)
+            if server_side(p):
+                if by_server(p, "doublon", lambda: rclone("deletefile", "--drive-use-trash", DRIVE_RCLONE + os.path.relpath(p, DRIVE)) or "corbeille du Drive"):
+                    log(f"DOUBLON {name}  (identical to {orig}) -> the Drive's trash, by the server")
+                    activity.log("doublon", name, src=where(os.path.dirname(p)), dst="corbeille du Drive",
+                                 detail=f"identique à {twin(orig)} : mis à la corbeille du Drive par le serveur")
+            else:
+                actions.append(make_action("doublon", p, original=nfc(orig)))
+                log(f"DOUBLON {name}  (identical to {orig}) -> Trash, by the Mac")
+                later.append(("doublon", name, {"src": where(os.path.dirname(p)), "dst": "Corbeille du Mac",
+                                                "detail": f"identique à {twin(orig)} : le Mac le met à la Corbeille à son prochain passage"}))
+        if not files:
+            REPORT.set("decide", "skipped")
+        else:
+            REPORT.running("decide")
+            choices = choose(files)
+            REPORT.set("decide", "ok")
+            for src, dest, new, conf, d in choices:
+                name, origin = os.path.basename(src), where(os.path.dirname(src))
+                ai = {"engine": "claude", "model": MODEL, "confidence": conf}
+                if dest is None:
+                    signature = sig(src)   # before a move: the mount may stop showing the file at once
+                    why = kept_why(conf, d)
+                    if os.path.dirname(src) == GMAIL_INBOX:   # a doubtful invoice joins the inbox Benjamin looks at; an attachment stays
+                        if server_side(src):
+                            moved = by_server(src, "vers 00 À trier", lambda: drive_move(src, os.path.relpath(DRIVE_INBOX, DRIVE), name))
+                            if not moved:
+                                continue
+                            activity.log("à trier", name, src=origin, dst=place("drive", moved), detail=f"{why} ; mis dans 00 À trier par le serveur", **ai)
+                        else:
+                            actions.append(make_action("vers_a_trier", src))
+                            later.append(("à trier", name, {"src": origin, "dst": where(DRIVE_INBOX),
+                                                            "detail": f"{why} ; le Mac le met dans 00 À trier à son prochain passage", **ai}))
+                    else:
+                        activity.log("gardé", name, src=origin, detail=why, **ai)
+                    save_kept(src, signature)
+                    log(f"GARDÉ   {name}  (confidence {conf:.2f}, proposed: {d.get('destination')}) — {d.get('raison')}")
+                    continue
+                base = "drive" if name.lower().endswith(OFFICE) else "icloud"
+                if base == "drive" and server_side(src):
+                    target = by_server(src, "rangement", lambda: drive_move(src, dest, new))
+                    if target:
+                        log(f"RANGÉ   {name}  ->  Drive/{target}  ({conf:.2f}) — {d.get('raison')} (by the server)")
+                        for action, obj, fields in filed(name, origin, place("drive", target), d, ai, "rangé par le serveur dans le Drive"):
+                            activity.log(action, obj, **fields)
+                    continue
+                actions.append(make_action("ranger", src, cible={"racine": base, "chemin": nfc(os.path.join(dest, new))}, confiance=conf, raison=d.get("raison", "")))
+                log(f"PLAN    {name}  ->  {'Drive/' if base == 'drive' else ''}{os.path.join(dest, new)}  ({conf:.2f}) — {d.get('raison')}")
+                later += filed(name, origin, place(base, nfc(os.path.join(dest, new))), d, ai, "le Mac le range à son prochain passage")
+        REPORT.set("drive", *(("failed", f"{len(failures)} déplacement(s) dans le Drive en échec, nouvel essai au prochain passage") if failures
+                              else ("ok",) if in_drive else ("skipped",)))
+        REPORT.running("plan")
         write_json(PLAN, {"genere_a": datetime.now().isoformat(timespec="seconds"), "actions": actions, "faites": done})
+        REPORT.set("plan", "ok" if actions else "skipped")
+        for action, obj, fields in later:
+            activity.log(action, obj, **fields)
+        activity.recovered("passage du tri")
     except Exception as e:
         log(f"ERREUR  {e}")
+        REPORT.fail(public_reason(e, REPORT.current()))
+        activity.failed("passage du tri", f"{type(e).__name__} : {e}")
         notify("Erreur du tri des fichiers sur le serveur : voir son journal")
         raise
     finally:
         lock.close()
+    REPORT.finish()
     if failures:   # after the plan is written; no notification every 5 minutes: the monitor reports a failed pass once
         log(f"ERREUR  {len(failures)} move(s) in the Drive failed, retried on the next pass: {', '.join(failures)}")
         sys.exit(1)

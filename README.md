@@ -72,7 +72,7 @@ python3 sort.py --dry-run
 |---|---|---|
 | `FILE_SORTER_ICLOUD` | iCloud Drive root | `~/Library/Mobile Documents/com~apple~CloudDocs` |
 | `FILE_SORTER_DRIVE` | Google Drive root | `~/` + `drive` of `settings.json` |
-| `FILE_SORTER_DATA` | folder of `plan.json`, `results.json`, `applied.json`, `kept.json`, `sort.lock` | the script's folder |
+| `FILE_SORTER_DATA` | folder of `plan.json`, `results.json`, `applied.json`, `kept.json`, `sort.lock`; on the server also `activity.jsonl` and `run-status.json` (below) | the script's folder |
 | `FILE_SORTER_INBOX` | another iCloud inbox, for a trial | iCloud `00 À trier` |
 | `FILE_SORTER_DRIVE_INBOX` | another Drive inbox, for a trial | Drive `00 À trier` |
 | `FILE_SORTER_ATTACHMENTS_INBOX` | another inbox of mail attachments, for a trial | Drive `00 Pièces jointes` |
@@ -80,6 +80,7 @@ python3 sort.py --dry-run
 | `FILE_SORTER_DOWNLOADS_MAX_MB` | largest download poured into the Drive | `50` |
 | `FILE_SORTER_CLAUDE` | `claude` binary | `/opt/homebrew/bin/claude` |
 | `FILE_SORTER_MODEL` | model | `haiku` |
+| `FILE_SORTER_MIN_AGE` | seconds a file must stay unchanged before it is handled (a trial; `tests.py` sets 0) | `60` |
 
 `rename.py` and `apply_plan.py` also read `ROOT` (another root, e.g. the Drive), and `rename.py` reads `SUFFIX` (separate plan files), `EXCLUDED` (folders to skip, separated by `|`) and `DOCS_ONLY` (rename documents only).
 
@@ -88,6 +89,13 @@ Scheduling: on the server, a timer runs `python3 -I sort.py --decide` with `FILE
 The file names above are shared between the server, the Mac and a dashboard, and the JSON keys inside the files are French: both are a contract. Rename a file only together with every program that reads it, and keep the keys.
 
 ## Operations and troubleshooting
+
+Checks after any change: `python3 -I tests.py` (offline: a sandbox with the example settings, a fake `claude` and a fake `rclone`; the CI runs it too).
+
+Activity journal and step report (`sort.py --decide` only: the server is their single writer; the Mac writes neither), for the System tab of the owner's dashboard, in `FILE_SORTER_DATA`:
+
+- `activity.jsonl`: one JSON event per line, appended: `{"time", "action", "object", "from", "to", "detail", "engine", "model", "confidence", "run"}`, French actions and texts: `rangé` (the destination, the new name included, the model's reason), `renommé` (old name → new name), `doublon` (the original it repeats), `gardé` (left in its inbox, with the reason), `à trier` (a doubtful invoice moved to the Drive's `00 À trier`), `sans réponse`, `échec` (a move in the Drive, or a whole pass: once per series of failed passes, then `rétabli`), and, read back from `results.json` at the next pass, what the Mac did: `rangé par le Mac`, `doublon jeté par le Mac`, `déposé par le Mac`, `mis à trier par le Mac`, `annulé` (the file was gone or had changed) or `échec` with its error. The decisions the Mac carries out are logged once `plan.json` is written, so a pass that fails before is not logged twice. File names are allowed there, never in a notification. Mode 600; past 5 MB, rewritten with the last 90 days (20,000 lines at most). A write that fails never stops the pass.
+- `run-status.json`: `{"time": start of the pass, "steps": {"inboxes", "decide", "drive", "plan", "icloud": "ok" | "skipped" | "running" | "failed: <message>"}}`, the workflow's steps, rewritten atomically at each change: a pass that fails, or that systemd stops, shows the step it was at. `icloud` speaks of the Mac's results read at this pass; while the Mac has actions to apply and nothing came back, it has no state. Messages are French and never name a file.
 
 Logs: on the Mac `~/Library/Logs/file-sorter.log`; on the server the service journal. Each line starts with a French keyword that docs and habits search for: `RANGÉ` (filed), `GARDÉ` (left in `00 À trier`), `DOUBLON` (duplicate to the Trash), `DÉPOSÉ` (document written), `VERSÉ` (a download poured into the Drive's `00 À trier`), `LAISSÉ` (a download that is not a document, left in Downloads), `PLAN` (server decision), `MAC` (status returned by the Mac), `ERREUR`, `SANS RÉPONSE` (no answer for that file, retried), `ATTENTE` (file or folder not available yet, retried), `TROP GROS`, `À DÉPOSER`. Notifications are French too: macOS notifications on the Mac, a `notifier` command on the server.
 

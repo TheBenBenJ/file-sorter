@@ -45,6 +45,10 @@ jobs:
           while IFS= read -r -d '' f; do python -m json.tool "$f" > /dev/null || status=1; done < <(git ls-files -z -- '*.json')
           exit $status
 
+      - name: Tests (tests.py, offline sandbox)
+        # sort.py --decide in a temporary folder, with the example settings, a fake claude and a fake rclone: no network, no account.
+        run: python -I tests.py
+
       - name: Promote to production
         # Fast-forward only: GitHub refuses anything else, and the run turns red.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
