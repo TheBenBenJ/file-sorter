@@ -75,8 +75,9 @@ for example, real in (("settings.example.json", "settings.json"), ("convention.e
     shutil.copy(HERE / example, code / real)
 (fake / "claude").write_text(f"""#!{sys.executable}
 import json, os, re, sys
-if os.environ.get("FAKE_CLAUDE_FAIL"):
-    sys.exit(print("rate limited", file=sys.stderr) or 1)
+if os.environ.get("FAKE_CLAUDE_FAIL"):   # what the CLI prints when the subscription's usage limit is reached
+    sys.exit(print(json.dumps({{"type": "result", "is_error": True, "api_error_status": 429, "api_error": "usage_limit_reached",
+                                "result": "You've hit your 5-hour limit · resets 9:30pm (Europe/Paris)", "usage": {{"input_tokens": 0}}}})) or 1)
 prompt = sys.argv[sys.argv.index("-p") + 1]
 answers = json.load(open(os.environ["FAKE_ANSWERS"], encoding="utf-8"))
 found = [{{"fichier": n, **answers[n]}} for n in re.findall(r"^### (.+)$", prompt, re.M) if n in answers]
@@ -187,10 +188,11 @@ n = len(events())
 write(icloud / "00 À trier" / "Nouveau.txt", "Un nouveau document arrivé dans iCloud. ")
 p = run("--decide", FAKE_CLAUDE_FAIL="1")
 new = events()[n:]
-check("model down: the pass fails at the step « decide », French message without a file name",
-      p.returncode != 0 and report()["steps"]["decide"] == "failed: Claude a échoué (code 1)" and report()["steps"]["inboxes"] == "ok")
+check("model down: the pass fails at the step « decide », French message without a file name, the cause read from Claude's answer",
+      p.returncode != 0 and report()["steps"]["decide"] == "failed: limite d'usage de Claude atteinte, reprise vers 21:30" and report()["steps"]["inboxes"] == "ok")
 check("model down: one « échec » with the error in the journal, on one line", [x["action"] for x in new if x["object"] == "passage du tri"] == ["échec"]
-      and next(x for x in new if x["action"] == "échec")["detail"] == "RuntimeError : claude failed (1): rate limited")
+      and next(x for x in new if x["action"] == "échec")["detail"] == "limite d'usage de Claude atteinte, reprise vers 21:30 ; RuntimeError : "
+      "claude failed (1): usage_limit_reached : You've hit your 5-hour limit · resets 9:30pm (Europe/Paris)")
 p = run("--decide", FAKE_CLAUDE_FAIL="1")
 check("model still down: no second « échec » for the same series", [x["action"] for x in events()[n:] if x["object"] == "passage du tri"] == ["échec"])
 answer({"Nouveau.txt": ("30 Santé", "2026-11-03 Médecin - Courrier.txt", 0.8, "courrier médical")})

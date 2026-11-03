@@ -292,12 +292,33 @@ Fichiers à classer :
     env = dict(os.environ, PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, cwd=tempfile.gettempdir(), env=env)
     if r.returncode != 0:
-        raise RuntimeError(f"claude failed ({r.returncode}): {r.stderr[-500:] or r.stdout[-500:]}")
+        raise RuntimeError(f"claude failed ({r.returncode}): {claude_error(r)}")
     data = json.loads(r.stdout)
     res = data.get("structured_output") or data.get("result")
     if isinstance(res, str):
         res = json.loads(re.search(r"\{.*\}", res, re.S).group(0))
     return res["fichiers"]
+
+
+def claude_error(r):
+    """Why claude -p failed: the error and the result of its JSON answer (a usage limit, an API error), else the end of its output."""
+    try:
+        data = json.loads(r.stdout)
+        text = " : ".join(str(data[k]) for k in ("api_error", "result") if data.get(k))
+        if text:
+            return text
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return (r.stderr[-500:] or r.stdout[-500:]).strip()
+
+
+def usage_limit(text):
+    """« limite d'usage de Claude atteinte, reprise vers 21:30 » when claude -p said so (claude_error), else None."""
+    if "usage_limit_reached" not in text:
+        return None
+    found = re.search(r"resets (\d{1,2})(?::(\d\d))?\s*([ap]m)", text)
+    hour = found and int(found.group(1)) % 12 + (12 if found.group(3) == "pm" else 0)
+    return "limite d'usage de Claude atteinte" + (f", reprise vers {hour:02d}:{found.group(2) or '00'}" if found else "")
 
 
 def safe_dest(rel, tree):
@@ -614,9 +635,12 @@ def _public_reason(e, step):
     if isinstance(e, subprocess.TimeoutExpired):
         program = os.path.basename(str(e.cmd[0] if isinstance(e.cmd, (list, tuple)) else e.cmd))
         return f"{program} n'a pas répondu en {int(e.timeout // 60)} min" if e.timeout >= 120 else f"{program} n'a pas répondu en {int(e.timeout)} s"
-    found = re.match(r"claude failed \((-?\d+)\)", str(e))
+    limit = usage_limit(str(e))
+    if limit:
+        return limit
+    found = re.match(r"claude failed \((-?\d+)\)(?:: ([a-z_]+) : )?", str(e))
     if found:
-        return f"Claude a échoué (code {found.group(1)})"
+        return f"Claude a échoué (code {found.group(1)}{', ' + found.group(2) if found.group(2) else ''})"
     if step == "decide" and isinstance(e, (ValueError, KeyError, TypeError, AttributeError)):
         return "réponse de Claude illisible"
     if isinstance(e, OSError):
@@ -747,8 +771,9 @@ def decide():
         activity.recovered("passage du tri")
     except Exception as e:
         log(f"ERREUR  {e}")
-        REPORT.fail(public_reason(e, REPORT.current()))
-        activity.failed("passage du tri", f"{type(e).__name__} : {e}")
+        reason = public_reason(e, REPORT.current())
+        REPORT.fail(reason)
+        activity.failed("passage du tri", f"{reason} ; {type(e).__name__} : {e}")
         notify("Erreur du tri des fichiers sur le serveur : voir son journal")
         raise
     finally:
