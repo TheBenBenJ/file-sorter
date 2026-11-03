@@ -136,7 +136,7 @@ write(icloud / "00 À trier" / "Scan facture.txt", "Facture EDF électricité oc
 write(drive / "00 Factures entrantes" / "Facture inconnue.txt", "Facture d'un émetteur difficile à lire, montant. ")
 write(drive / "00 Pièces jointes" / "2026-10-01 Objet - photo.txt", "Une photo de vacances envoyée par un ami. ")
 write(drive / "00 À trier" / "Mystère.txt", "Un document dont le modèle ne dira rien du tout. ")
-answer({"Contrat client.docx": ("50 Travail", "2026-10-01 Client - Contrat.docx", 0.9, "contrat de prestation du client"),
+answer({"Contrat client.docx": ("50 Travail", "2026-10-01 Client - Contrat.docx", 0.9, "contrat de prestation du client."),
         "Scan facture.txt": ("50 Travail", "2026-10-31 EDF - Facture.txt", 0.93, "facture d'électricité, émetteur EDF"),
         "Facture inconnue.txt": ("50 Travail", "Facture.txt", 0.4, "émetteur illisible"),
         "2026-10-01 Objet - photo.txt": ("30 Santé", "2026-10-01 Ami - Photo.txt", 0.5, "photo personnelle")})
@@ -146,7 +146,8 @@ check("pass 1: the pass goes through", p.returncode == 0 or print(p.stderr[-2000
 e = by(ev, "rangé", "Contrat client.docx")
 check("pass 1: an editable document filed by the server in the Drive: « rangé » with where from, where to, the model and its confidence",
       e and e["from"] == "Google Drive/00 À trier" and e["to"] == "Google Drive/50 Travail/2026-10-01 Client - Contrat.docx"
-      and e["engine"] == "claude" and e["model"] == "haiku" and e["confidence"] == 0.9 and "rangé par le serveur" in e["detail"]
+      and e["engine"] == "claude" and e["model"] == "haiku" and e["confidence"] == 0.9
+      and e["detail"] == "contrat de prestation du client ; rangé par le serveur dans le Drive"
       and (drive / "50 Travail" / "2026-10-01 Client - Contrat.docx").exists())
 e = by(ev, "renommé", "Contrat client.docx")
 check("pass 1: its new name, « renommé » from the old name to the new one", e and e["from"] == "Contrat client.docx" and e["to"] == "2026-10-01 Client - Contrat.docx")

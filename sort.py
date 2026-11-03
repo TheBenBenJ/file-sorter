@@ -557,13 +557,14 @@ def kept_why(conf, d):
         why = f"pas assez sûr ({round(conf * 100)} %, il faut {round(THRESHOLD * 100)} %)"
     else:
         why = "dossier proposé hors de l'arborescence"
-    proposed = d.get("destination")
-    return f"{why} ; proposait « {proposed} »" + (f" : {d['raison']}" if d.get("raison") else "") if proposed else why
+    proposed, reason = d.get("destination"), str(d.get("raison") or "").strip().rstrip(".")
+    return f"{why} ; proposait « {proposed} »" + (f" : {reason}" if reason else "") if proposed else why
 
 
 def filed(name, origin, target, d, ai, how):
     """The events of a filing: « rangé », then « renommé » when the name changes. target: the new place, name included."""
-    events = [("rangé", name, {"src": origin, "dst": target, "detail": " ; ".join(str(x) for x in (d.get("raison"), how) if x), **ai})]
+    reason = str(d.get("raison") or "").strip().rstrip(".")   # the model's sentence, joined to what happens next
+    events = [("rangé", name, {"src": origin, "dst": target, "detail": " ; ".join(x for x in (reason, how) if x), **ai})]
     new = target.rsplit("/", 1)[-1]
     if nfc(new) != nfc(name):
         events.append(("renommé", name, {"src": name, "dst": new, "detail": "nom refait selon la convention", **ai}))

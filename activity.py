@@ -149,8 +149,11 @@ class Report:
     def fail(self, message, step=None):
         """The step given, else the one running, else the first one without a state, fails with this message (French, no file name)."""
         step = step or self.current() or next((s for s in self.order if s not in self.steps), None)
+        self.steps = {s: v for s, v in self.steps.items() if v != "running" or s == step}   # what it left unfinished has no state
         if step:
             self.set(step, "failed", message)
+        else:
+            self.write()
 
     def finish(self):
         """The end of a run that went through: a step still marked running is done."""
