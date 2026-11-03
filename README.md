@@ -1,6 +1,6 @@
 # file-sorter
 
-*Formerly `tri-icloud` (renamed on 03/11/2026). The installed folder keeps that name, `~/.local/share/tri-icloud`, because it also holds the tool's state, which other programs read.*
+*Formerly `tri-icloud` (renamed on 03/11/2026, with its folders, log and environment variables).*
 
 Automatic filing of personal documents into a numbered folder tree on iCloud Drive (and Google Drive for office files). Claude proposes a destination and a clean name for each new file; a plain Python script validates the proposal and moves the file. Nothing is ever overwritten, and when in doubt the file stays where it is.
 
@@ -63,22 +63,22 @@ python3 tri.py --dry-run
 
 | Variable | Meaning | Default (the Mac) |
 |---|---|---|
-| `TRI_ICLOUD` | iCloud Drive root | `~/Library/Mobile Documents/com~apple~CloudDocs` |
-| `TRI_DRIVE` | Google Drive root | `~/` + `drive` of `reglages.json` |
-| `TRI_DONNEES` | folder of `tri-plan.json`, `tri-resultats.json`, `tri-appliques.json`, `gardes.json`, `tri.lock` | the script's folder |
-| `TRI_A_TRIER` | another inbox, for a trial | iCloud `00 À trier` |
-| `TRI_CLAUDE` | `claude` binary | `/opt/homebrew/bin/claude` |
-| `TRI_MODEL` | model | `haiku` |
+| `FILE_SORTER_ICLOUD` | iCloud Drive root | `~/Library/Mobile Documents/com~apple~CloudDocs` |
+| `FILE_SORTER_DRIVE` | Google Drive root | `~/` + `drive` of `reglages.json` |
+| `FILE_SORTER_DATA` | folder of `tri-plan.json`, `tri-resultats.json`, `tri-appliques.json`, `gardes.json`, `tri.lock` | the script's folder |
+| `FILE_SORTER_INBOX` | another inbox, for a trial | iCloud `00 À trier` |
+| `FILE_SORTER_CLAUDE` | `claude` binary | `/opt/homebrew/bin/claude` |
+| `FILE_SORTER_MODEL` | model | `haiku` |
 
 `renommer.py` and `appliquer-plan.py` also read `RACINE` (another root, e.g. the Drive), and `renommer.py` reads `SUFFIXE` (separate plan files), `EXCLUS` (folders to skip, separated by `|`) and `DOCS_SEULEMENT` (rename documents only).
 
-Scheduling: on the server, a timer runs `python3 -I tri.py --decider` with `TRI_ICLOUD`, `TRI_DRIVE` and `TRI_DONNEES` pointing at the read-only mounts and a data folder; the personal files are copied next to the code. On the Mac, an agent fetches `tri-plan.json` into this folder, runs `tri.py --appliquer` and sends `tri-resultats.json` back. (The units and the relay live in a separate, private repo.)
+Scheduling: on the server, a timer runs `python3 -I tri.py --decider` with `FILE_SORTER_ICLOUD`, `FILE_SORTER_DRIVE` and `FILE_SORTER_DATA` pointing at the read-only mounts and a data folder; the personal files are copied next to the code. On the Mac, an agent fetches `tri-plan.json` into this folder, runs `tri.py --appliquer` and sends `tri-resultats.json` back. (The units and the relay live in a separate, private repo.)
 
 The file names and JSON keys above are French and shared between the server, the Mac and a dashboard: they are a contract, do not rename them.
 
 ## Operations and troubleshooting
 
-Logs: on the Mac `~/Library/Logs/tri-icloud.log`; on the server the service journal. Each line starts with a French keyword that docs and habits search for: `RANGÉ` (filed), `GARDÉ` (left in `00 À trier`), `DOUBLON` (duplicate to the Trash), `DÉPOSÉ` (document written), `VERSÉ` (Downloads poured into `00 À trier`), `PLAN` (server decision), `MAC` (status returned by the Mac), `ERREUR`, `SANS RÉPONSE` (no answer for that file, retried), `ATTENTE` (file or folder not available yet, retried), `TROP GROS`, `À DÉPOSER`. Notifications are French too: macOS notifications on the Mac, a `notifier` command on the server.
+Logs: on the Mac `~/Library/Logs/file-sorter.log`; on the server the service journal. Each line starts with a French keyword that docs and habits search for: `RANGÉ` (filed), `GARDÉ` (left in `00 À trier`), `DOUBLON` (duplicate to the Trash), `DÉPOSÉ` (document written), `VERSÉ` (Downloads poured into `00 À trier`), `PLAN` (server decision), `MAC` (status returned by the Mac), `ERREUR`, `SANS RÉPONSE` (no answer for that file, retried), `ATTENTE` (file or folder not available yet, retried), `TROP GROS`, `À DÉPOSER`. Notifications are French too: macOS notifications on the Mac, a `notifier` command on the server.
 
 | Symptom | Cause | Remedy |
 |---|---|---|
@@ -87,7 +87,7 @@ Logs: on the Mac `~/Library/Logs/tri-icloud.log`; on the server the service jour
 | A file waits in `00 À trier` | Mac asleep, plan not fetched yet, mounts a few minutes behind | wait for the next pass, or run the relay by hand; an action not returned within 7 days is dropped by the server |
 | A rule or convention change has no effect | the server has its own copy of the personal files | copy `reglages.json`, `regles.md` and `convention.md` to the server again |
 
-Before deploying a change: `python3 -I -m py_compile tri.py`, then `python3 -I tri.py --dry-run` on the Mac, or `--decider` with `TRI_A_TRIER` and `TRI_DONNEES` pointing at trial folders.
+Before deploying a change: `python3 -I -m py_compile tri.py`, then `python3 -I tri.py --dry-run` on the Mac, or `--decider` with `FILE_SORTER_INBOX` and `FILE_SORTER_DATA` pointing at trial folders.
 
 `gmail-factures.gs` is deployed by hand in Google Apps Script and is kept out of this repo (personal mail queries and folder ids). Automation never modifies it; a change is pasted into the Apps Script editor by a person.
 

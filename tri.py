@@ -9,8 +9,8 @@ Ways to run it:
                        writes tri-plan.json (ranger, vers_a_trier, doublon); tri-resultats.json, returned by the Mac, removes what is done
   tri.py --appliquer   on the Mac: applies tri-plan.json received from the server, pours ~/Downloads into 00 À trier, writes tri-resultats.json
   tri.py --deposer <icloud|drive> <path> <file>   on the server: hands the Mac a document to write there (the VAT check report, for example)
-Paths: TRI_ICLOUD, TRI_DRIVE, TRI_DONNEES (plan, results, files left in place), TRI_CLAUDE; the defaults are the Mac's.
-TRI_A_TRIER replaces the inbox for a trial, TRI_MODEL the model (haiku).
+Paths: FILE_SORTER_ICLOUD, FILE_SORTER_DRIVE, FILE_SORTER_DATA (plan, results, files left in place), FILE_SORTER_CLAUDE; the defaults are the Mac's.
+FILE_SORTER_INBOX replaces the inbox for a trial, FILE_SORTER_MODEL the model (haiku).
 """
 import fcntl, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, unicodedata
 from datetime import datetime
@@ -20,25 +20,25 @@ with open(os.path.join(HERE, "reglages.json"), encoding="utf-8") as f:
     SETTINGS = json.load(f)   # identity and personal paths, kept out of the repo (see reglages.exemple.json)
 MAC = sys.platform == "darwin"
 ROLE = "decide" if "--decider" in sys.argv else "apply" if "--appliquer" in sys.argv else "deposit" if "--deposer" in sys.argv else "full"
-ICLOUD = os.environ.get("TRI_ICLOUD") or os.path.join(HOME, "Library/Mobile Documents/com~apple~CloudDocs")
-DRIVE = os.environ.get("TRI_DRIVE") or os.path.join(HOME, SETTINGS["drive"])
-DATA = os.environ.get("TRI_DONNEES") or HERE
-INBOX = os.environ.get("TRI_A_TRIER") or os.path.join(ICLOUD, "00 À trier")   # TRI_A_TRIER: another inbox, for a trial
+ICLOUD = os.environ.get("FILE_SORTER_ICLOUD") or os.path.join(HOME, "Library/Mobile Documents/com~apple~CloudDocs")
+DRIVE = os.environ.get("FILE_SORTER_DRIVE") or os.path.join(HOME, SETTINGS["drive"])
+DATA = os.environ.get("FILE_SORTER_DATA") or HERE
+INBOX = os.environ.get("FILE_SORTER_INBOX") or os.path.join(ICLOUD, "00 À trier")   # FILE_SORTER_INBOX: another inbox, for a trial
 DOWNLOADS = os.path.join(HOME, "Downloads")
 GMAIL_INBOX = os.path.join(DRIVE, "00 Factures entrantes")  # filled by gmail-factures.gs
 EXTERNAL = (DOWNLOADS, GMAIL_INBOX)   # sources outside iCloud: a doubtful file goes to 00 À trier
 OFFICE = (".docx", ".doc", ".odt", ".xlsx", ".xls", ".ods")   # editable: they go to the Drive, same tree, converted to Google Docs/Sheets by the Apps Script
-PREVIEWS = tempfile.mkdtemp(prefix="tri-icloud-")
+PREVIEWS = tempfile.mkdtemp(prefix="file-sorter-")
 PARTIAL_EXT = (".crdownload", ".download", ".part", ".partial", ".tmp", ".opdownload")
 MAX_SIZE = 500 * 1024 * 1024   # above this, the file stays in Downloads (dumps...)
-LOG = os.path.join(HOME, "Library/Logs/tri-icloud.log") if MAC else None   # elsewhere: standard output, kept by the service's journal
+LOG = os.path.join(HOME, "Library/Logs/file-sorter.log") if MAC else None   # elsewhere: standard output, kept by the service's journal
 LOCK = os.path.join(DATA, "tri.lock")
 KEPT = os.path.join(DATA, "gardes.json")   # files left in place, not to be asked about again
 PLAN = os.path.join(DATA, "tri-plan.json")
 RESULTS = os.path.join(DATA, "tri-resultats.json")
 APPLIED = os.path.join(DATA, "tri-appliques.json")   # Mac: actions already applied, kept 7 days
-CLAUDE = os.environ.get("TRI_CLAUDE") or "/opt/homebrew/bin/claude"
-MODEL = os.environ.get("TRI_MODEL", "haiku")
+CLAUDE = os.environ.get("FILE_SORTER_CLAUDE") or "/opt/homebrew/bin/claude"
+MODEL = os.environ.get("FILE_SORTER_MODEL", "haiku")
 MIN_AGE = 60          # seconds without modification before a file is handled
 MAX_FILES = 15        # per pass
 THRESHOLD = 0.7       # minimum confidence to move a file
