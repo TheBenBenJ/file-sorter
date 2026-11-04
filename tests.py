@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Checks of file-sorter, offline and without touching anything real: python3 -I tests.py
 The server's pass (sort.py --decide) runs in a sandbox: a copy of the code with the example settings, fake iCloud and Drive folders, a fake
-claude that answers from a table, a fake rclone that moves inside the fake Drive. Checked: the activity journal and the step report the
-Dashboard reads (activity.py), pass after pass: decisions, moves in the Drive, the Mac's results, a failing model, a failing Drive.
+claude that answers from a table, a fake local model (the home server's OpenAI API, its /tokenize included) that answers from another,
+a fake rclone that moves inside the fake Drive. Checked: the activity journal and the step report the Dashboard reads (activity.py), pass
+after pass: decisions, moves in the Drive, the Mac's results, a failing model, a failing Drive; the shadow mode of the server's unit
+(FILE_SORTER_SHADOW=1: Claude decides, the local model is compared), then the local model deciding for the files with text, its batches
+measured against its 16k-token slot, and the local model down.
 The French file names and texts below are test data, as the owner's would be."""
-import contextlib, io, json, os, shutil, subprocess, sys, tempfile
+import contextlib, http.server, io, json, os, re, shutil, subprocess, sys, tempfile, threading
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -63,6 +66,41 @@ with tempfile.TemporaryDirectory() as t:
     r.finish()
     check("report: a run that went through leaves no step running", r.steps == {"a": "ok"} and not list(Path(t).glob(".*.tmp")))
 
+class Local(http.server.BaseHTTPRequestHandler):
+    """The local model as sort.py reaches it. /tokenize: a token per two characters. A question: for each file of the prompt, the answer
+    the table answers holds for it (none for a file it does not hold). down: 503; refuse_over: a question about more files is refused as
+    longer than the slot (400). Each question answered is kept in asked: the files, the prompt's tokens and the answer's reserve."""
+    down, refuse_over, answers, asked = False, None, {}, []
+
+    def reply(self, data, code=200):
+        out = json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path == "/tokenize":
+            return self.reply({"tokens": list(range((len(body["content"]) + 1) // 2))})
+        if Local.down:
+            return self.reply({"error": {"code": 503, "message": "Loading model"}}, 503)
+        prompt = body["messages"][0]["content"]
+        names = re.findall(r"^### (.+)$", prompt, re.M)
+        if Local.refuse_over and len(names) > Local.refuse_over:
+            return self.reply({"error": {"code": 400, "type": "exceed_context_size_error"}}, 400)
+        Local.asked.append({"names": names, "tokens": (len(prompt) + 1) // 2, "max_tokens": body["max_tokens"], "body": body})
+        found = [{"fichier": n, **Local.answers[n]} for n in names if n in Local.answers]
+        self.reply({"choices": [{"message": {"content": json.dumps({"fichiers": found})}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": (len(prompt) + 1) // 2}})
+
+    def log_message(self, *a):
+        pass
+
+
+LOCAL = http.server.HTTPServer(("127.0.0.1", 0), Local)
+threading.Thread(target=LOCAL.serve_forever, daemon=True).start()
+
 # ---- the server's pass in a sandbox ----
 T = Path(tempfile.mkdtemp(prefix="file-sorter-tests-"))
 code, icloud, drive, data, fake, home = (T / x for x in ("code", "icloud", "drive", "data", "bin", "home"))
@@ -80,7 +118,9 @@ if os.environ.get("FAKE_CLAUDE_FAIL"):   # what the CLI prints when the subscrip
                                 "result": "You've hit your 5-hour limit · resets 9:30pm (Europe/Paris)", "usage": {{"input_tokens": 0}}}})) or 1)
 prompt = sys.argv[sys.argv.index("-p") + 1]
 answers = json.load(open(os.environ["FAKE_ANSWERS"], encoding="utf-8"))
-found = [{{"fichier": n, **answers[n]}} for n in re.findall(r"^### (.+)$", prompt, re.M) if n in answers]
+names = re.findall(r"^### (.+)$", prompt, re.M)
+open(os.environ["FAKE_CLAUDE_LOG"], "a", encoding="utf-8").write(json.dumps(names) + "\\n")   # the files Claude was asked about
+found = [{{"fichier": n, **answers[n]}} for n in names if n in answers]
 print(json.dumps({{"structured_output": {{"fichiers": found}}}}))
 """)
 (fake / "rclone").write_text(f"""#!{sys.executable}
@@ -111,15 +151,29 @@ def write(path, text):
     path.write_text(text * 3, encoding="utf-8")   # more than 40 characters: sort.py sends the text, not the file
 
 
-def answer(table):
-    answers.write_text(json.dumps({n: {"destination": dest, "nouveau_nom": new, "confiance": c, "raison": why}
-                                   for n, (dest, new, c, why) in table.items()}, ensure_ascii=False), encoding="utf-8")
+claude_log = T / "claude-asked.jsonl"
+
+
+def answer(table, local=None):
+    """What the fake claude answers, and the fake local model (the same unless local says otherwise)."""
+    rows = lambda t: {n: {"destination": dest, "nouveau_nom": new, "confiance": c, "raison": why} for n, (dest, new, c, why) in t.items()}
+    answers.write_text(json.dumps(rows(table), ensure_ascii=False), encoding="utf-8")
+    Local.answers = rows(table if local is None else local)
+
+
+def claude_asked():
+    """The files claude was asked about, question by question, since the last call."""
+    asked = [json.loads(x) for x in claude_log.read_text(encoding="utf-8").splitlines()] if claude_log.exists() else []
+    claude_log.unlink(missing_ok=True)
+    return asked
 
 
 def run(*args, **env):
+    """One pass of sort.py, by default as the server's unit runs it from 04/11/2026: Claude decides, the local model is compared."""
     e = {"PATH": f"{fake}:/usr/bin:/bin", "HOME": str(home), "LANG": "C.UTF-8", "FILE_SORTER_ICLOUD": str(icloud), "FILE_SORTER_DRIVE": str(drive),
          "FILE_SORTER_DATA": str(data), "FILE_SORTER_CLAUDE": str(fake / "claude"), "FILE_SORTER_DRIVE_RCLONE": "gsort:", "FILE_SORTER_MIN_AGE": "0",
-         "FAKE_DRIVE": str(drive), "FAKE_ANSWERS": str(answers), **env}
+         "FILE_SORTER_LOCAL_URL": f"http://127.0.0.1:{LOCAL.server_port}", "FILE_SORTER_SHADOW": "1",
+         "FAKE_DRIVE": str(drive), "FAKE_ANSWERS": str(answers), "FAKE_CLAUDE_LOG": str(claude_log), **env}
     return subprocess.run([sys.executable, "-I", str(code / "sort.py"), *args], env=e, capture_output=True, text=True, timeout=120)
 
 
@@ -137,10 +191,13 @@ write(icloud / "00 À trier" / "Scan facture.txt", "Facture EDF électricité oc
 write(drive / "00 Factures entrantes" / "Facture inconnue.txt", "Facture d'un émetteur difficile à lire, montant. ")
 write(drive / "00 Pièces jointes" / "2026-10-01 Objet - photo.txt", "Une photo de vacances envoyée par un ami. ")
 write(drive / "00 À trier" / "Mystère.txt", "Un document dont le modèle ne dira rien du tout. ")
-answer({"Contrat client.docx": ("50 Travail", "2026-10-01 Client - Contrat.docx", 0.9, "contrat de prestation du client."),
-        "Scan facture.txt": ("50 Travail", "2026-10-31 EDF - Facture.txt", 0.93, "facture d'électricité, émetteur EDF"),
-        "Facture inconnue.txt": ("50 Travail", "Facture.txt", 0.4, "émetteur illisible"),
-        "2026-10-01 Objet - photo.txt": ("30 Santé", "2026-10-01 Ami - Photo.txt", 0.5, "photo personnelle")})
+haiku = {"Contrat client.docx": ("50 Travail", "2026-10-01 Client - Contrat.docx", 0.9, "contrat de prestation du client."),
+         "Scan facture.txt": ("50 Travail", "2026-10-31 EDF - Facture.txt", 0.93, "facture d'électricité, émetteur EDF"),
+         "Facture inconnue.txt": ("50 Travail", "Facture.txt", 0.4, "émetteur illisible"),
+         "2026-10-01 Objet - photo.txt": ("30 Santé", "2026-10-01 Ami - Photo.txt", 0.5, "photo personnelle")}
+answer(haiku, {**haiku, "Scan facture.txt": ("50 Travail", "2026-10-31 EDF - Facture électricité.txt", 0.9, "facture EDF"),   # another name
+               "Facture inconnue.txt": ("30 Santé", "Facture.txt", 0.45, "illisible"),   # also left, another folder proposed: the same outcome
+               "2026-10-01 Objet - photo.txt": ("30 Santé", "2026-10-01 Ami - Photo.txt", 0.8, "photo")})   # filed, where Haiku leaves it
 p = run("--decide")
 ev = events()
 check("pass 1: the pass goes through", p.returncode == 0 or print(p.stderr[-2000:]))
@@ -169,6 +226,19 @@ check("pass 1: a file the model skipped is « sans réponse »", by(ev, "sans r�
 check("pass 1: one run for all the events", len({x["run"] for x in ev}) == 1 and len(ev) == 9)
 check("pass 1: the step report", report()["steps"] == {"inboxes": "ok", "decide": "ok", "drive": "ok", "plan": "ok", "icloud": "skipped"}
       and report()["time"] == ev[0]["run"])
+shadow = [x.split("  ", 1)[1] for x in p.stdout.splitlines() if "  shadow: " in x]
+check("shadow: Claude decides for every file, the journal says so",
+      all(x.get("engine") == "claude" for x in ev if "model" in x) and [sorted(x) for x in claude_asked()]
+      == [sorted(["Contrat client.docx", "Scan facture.txt", "Facture inconnue.txt", "2026-10-01 Objet - photo.txt", "Mystère.txt"])])
+check("shadow: the local model gets the files with text only, in one question", [sorted(x["names"]) for x in Local.asked]
+      == [sorted(["Scan facture.txt", "Facture inconnue.txt", "2026-10-01 Objet - photo.txt", "Mystère.txt"])])
+check("shadow: one line per file the two would not file the same way, folder or name",
+      "shadow: Scan facture.txt  haiku=50 Travail/2026-10-31 EDF - Facture.txt (0.93)  local=50 Travail/2026-10-31 EDF - Facture électricité.txt (0.90)" in shadow
+      and any(x.startswith("shadow: 2026-10-01 Objet - photo.txt  haiku=stays (0.50") and x.endswith("local=30 Santé/2026-10-01 Ami - Photo.txt (0.80)") for x in shadow)
+      and not any("Facture inconnue.txt" in x for x in shadow))
+check("shadow: a summary of the comparison, and the prompt's size measured", "shadow: 3 file(s) with text compared: 1 the same, 2 different, 0 without a local answer" in shadow
+      and any(x.startswith("shadow: local model qwen3.5-9b: 3 of 4 file(s) answered, ") and x.endswith(" prompt tokens") for x in shadow))
+Local.asked.clear()
 
 plan = json.loads((data / "plan.json").read_text(encoding="utf-8"))
 ids = {a["type"]: a["id"] for a in plan["actions"]}
@@ -186,6 +256,7 @@ check("pass 3: a result already logged is not logged again", not [x for x in eve
 
 n = len(events())
 write(icloud / "00 À trier" / "Nouveau.txt", "Un nouveau document arrivé dans iCloud. ")
+claude_asked()
 p = run("--decide", FAKE_CLAUDE_FAIL="1")
 new = events()[n:]
 check("model down: the pass fails at the step « decide », French message without a file name, the cause read from Claude's answer",
@@ -216,7 +287,93 @@ n = len(events())
 p = run("--deposit", "icloud", "50 Travail/2026-11-03 Rapport.md", str(T / "report.md"))
 check("--deposit (the VAT check's report for the Mac) writes no event", p.returncode == 0 and len(events()) == n)
 check("no file left behind by the atomic writes", not list(data.glob("*.tmp")) and not list(data.glob(".*.tmp")))
+
+# ---- without the shadow: the local model decides for the files with text, Claude only reads what has none ----
+for f in list((icloud / "00 À trier").iterdir()) + list((drive / "00 À trier").iterdir()) + list((drive / "00 Pièces jointes").iterdir()):
+    f.unlink()
+(data / "kept.json").write_text("[]")
+write(icloud / "00 À trier" / "Ordonnance.txt", "Ordonnance du docteur Martin, Rennes, 02/11/2026. ")
+(icloud / "00 À trier" / "Photo carte.jpg").write_bytes(b"\xff\xd8\xff\xe0 not a text")   # no text: Claude reads it
+answer({"Photo carte.jpg": ("30 Santé", "2026-11-02 CPAM - Carte Vitale.jpg", 0.9, "carte Vitale"),
+        "Ordonnance.txt": ("30 Santé", "2026-11-02 Dr Martin - Ordonnance.txt", 0.95, "ordonnance")})
+n, _ = len(events()), claude_asked()
+Local.asked.clear()
+p = run("--decide", FILE_SORTER_SHADOW="")
+new = events()[n:]
+e = by(new, "rangé", "Ordonnance.txt")
+check("local model: it decides for a file with text, and the journal names it", p.returncode == 0 and e and e["engine"] == "local"
+      and e["model"] == "qwen3.5-9b" and e["confidence"] == 0.95 and e["to"] == "iCloud/30 Santé/2026-11-02 Dr Martin - Ordonnance.txt")
+e = by(new, "rangé", "Photo carte.jpg")
+check("local model: a file without text still goes to Claude, and only it", e and e["engine"] == "claude" and e["model"] == "haiku"
+      and claude_asked() == [["Photo carte.jpg"]] and [x["names"] for x in Local.asked] == [["Ordonnance.txt"]])
+sent = Local.asked[0]["body"]
+fichiers = sent["response_format"]["json_schema"]["schema"]["properties"]["fichiers"]
+check("local model: strict schema, one answer per file, the names asked only, temperature 0, no thinking, no tool, the line on « confiance »",
+      sent["response_format"]["json_schema"]["strict"] is True and fichiers["minItems"] == fichiers["maxItems"] == 1
+      and fichiers["items"]["properties"]["fichier"]["enum"] == ["Ordonnance.txt"] and sent["temperature"] == 0
+      and sent["chat_template_kwargs"] == {"enable_thinking": False} and "tools" not in sent
+      and "ta certitude sur la destination et le nom que tu proposes" in sent["messages"][0]["content"])
+check("local model: no « shadow: » line without the shadow", "shadow:" not in p.stdout)
+
+n = len(events())
+write(icloud / "00 À trier" / "Résultats.txt", "Résultats d'analyse sanguine du laboratoire, 03/11/2026. ")
+answer({"Résultats.txt": ("30 Santé", "2026-11-03 Laboratoire - Résultats.txt", 0.9, "analyse")})
+Local.down = True
+p = run("--decide", FILE_SORTER_SHADOW="")
+Local.down = False
+new = events()[n:]
+e = by(new, "sans réponse", "Résultats.txt")
+check("local model down: the file stays, « sans réponse », and no other model is asked", p.returncode == 0 and e and e["engine"] == "local"
+      and "pas de réponse du modèle local (injoignable, HTTP 503) : nouvel essai au prochain passage" == e["detail"]
+      and (icloud / "00 À trier" / "Résultats.txt").exists() and not claude_asked() and not by(new, "rangé", "Résultats.txt"))
+check("local model down: the step « decide » says so, without a file name, and the pass goes on",
+      report()["steps"]["decide"] == "failed: le modèle local n'a pas répondu pour 1 fichier(s) : nouvel essai au prochain passage"
+      and report()["steps"]["plan"] in ("ok", "skipped") and "SANS RÉPONSE Résultats.txt" in p.stdout)
+p = run("--decide", FILE_SORTER_SHADOW="")
+check("local model back: the file is decided at the next pass", by(events()[n:], "rangé", "Résultats.txt") and report()["steps"]["decide"] == "ok")
+p = run("--decide", FILE_SORTER_SHADOW="", FILE_SORTER_LOCAL_URL="off")
+check("local model off: no question at all", p.returncode == 0)
+
+# ---- the local model's batches: measured with its tokenizer against a 16k-token slot, 5 files at most ----
+for f in (icloud / "00 À trier").iterdir():
+    f.unlink()
+(data / "plan.json").unlink(missing_ok=True)
+(data / "kept.json").write_text("[]")
+figures = "Facture n° FA-2026-10-4471 du 31/10/2026, client 6004 512 873, 412 kWh, HT 68,42 €, TVA 13,68 €, TTC 82,10 €. "
+names = [f"Facture {i:02d}.txt" for i in range(12)]
+for i, name in enumerate(names):   # each its own figures (identical files would be duplicates), more than 2,500 characters: cut to 2,500
+    (icloud / "00 À trier" / name).write_text((figures.replace("4471", f"44{i:02d}") * 30)[:2600], encoding="utf-8")
+answer({name: ("50 Travail", f"2026-10-31 EDF - Facture {name[8:10]}.txt", 0.9, "facture") for name in names})
+
+
+def batches(folders):
+    """One pass on the twelve invoices with a tree of that many folders: [(files, prompt tokens, answer's reserve)] of each question."""
+    shutil.rmtree(icloud / "40 Logement", ignore_errors=True)
+    for i in range(folders):
+        (icloud / "40 Logement" / f"Dossier {i:04d}").mkdir(parents=True, exist_ok=True)
+    (data / "plan.json").unlink(missing_ok=True)
+    Local.asked.clear()
+    p = run("--decide", FILE_SORTER_SHADOW="")
+    return p, [(len(x["names"]), x["tokens"], x["max_tokens"]) for x in Local.asked]
+
+
+p, seen = batches(150)
+print(f"measure: 150 folders, 2,500 characters a file: {[x[0] for x in seen]} files a question, prompts of {[x[1] for x in seen]} tokens")
+check("batches: a usual tree, 5 files a question, each within the slot", p.returncode == 0 and [x[0] for x in seen] == [5, 5, 2]
+      and all(tokens + reserve + 256 <= 16384 for _, tokens, reserve in seen))
+p, seen = batches(700)
+print(f"measure: 700 folders, 2,500 characters a file: {[x[0] for x in seen]} files a question, prompts of {[x[1] for x in seen]} tokens")
+check("batches: a big tree, fewer files a question (3 here), each within the slot", p.returncode == 0 and max(x[0] for x in seen) == 3
+      and sum(x[0] for x in seen) == 12 and all(tokens + reserve + 256 <= 16384 for _, tokens, reserve in seen))
+p, seen = batches(2000)
+check("batches: a tree too big for even one file, each file waits « sans réponse », nothing asked", p.returncode == 0 and not seen
+      and "trop long pour un créneau" in by(events(), "sans réponse", "Facture 00.txt")["detail"])
+Local.refuse_over = 2
+p, seen = batches(150)
+Local.refuse_over = None
+check("batches: a question refused as too long is asked again in halves", p.returncode == 0 and max(x[0] for x in seen) <= 2 and sum(x[0] for x in seen) == 12)
 shutil.rmtree(T)
+LOCAL.shutdown()
 
 print(f"\n{failures} failure(s)")
 sys.exit(1 if failures else 0)

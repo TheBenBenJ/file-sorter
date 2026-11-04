@@ -2,8 +2,11 @@
 """Sorts the inboxes into the numbered folder tree, automatically: the Drive's 00 À trier (where the iPhone and the Mac's
 Downloads put documents), the Drive's 00 Factures entrantes (invoices from Gmail), iCloud's 00 À trier, and last the Drive's
 00 Pièces jointes (the attachments of the mails, exported by the mail sorter; a doubtful one stays there).
-Claude (CLI, Read tool only) proposes a destination and a name for each file; this script validates them and files the
-file: editable documents in the Drive, finished ones in iCloud. Nothing is ever overwritten; when in doubt, the file stays.
+A model proposes a destination and a name for each file: the home server's local model for the files whose text can be read (an
+OpenAI API, no tool, a strict JSON schema), Claude (CLI, Read tool only) for the others (scans, images: the local model reads no image).
+This script validates them and files the file: editable documents in the Drive, finished ones in iCloud. Nothing is ever overwritten;
+when in doubt, the file stays. With FILE_SORTER_SHADOW=1, Claude decides for every file and the local model only answers alongside
+for the files with text: each disagreement on the folder or the name is a « shadow: » line of the journal.
 
 Ways to run it:
   sort.py [--dry-run]  everything on the Mac: decide and move (the original mode)
@@ -14,13 +17,14 @@ Ways to run it:
                        Drive's 00 À trier, writes results.json
   sort.py --deposit <icloud|drive> <path> <file>   on the server: hands the Mac a document to write there (the VAT check report, for example)
 Paths: FILE_SORTER_ICLOUD, FILE_SORTER_DRIVE, FILE_SORTER_DATA (plan, results, files left in place), FILE_SORTER_CLAUDE; the defaults are the Mac's.
+FILE_SORTER_LOCAL_URL: the local model (default 127.0.0.1:11234; "off": none, the files with text wait), FILE_SORTER_SHADOW=1: see above.
 With --decide, every decision and action, the server's and the Mac's (read back from results.json), goes to activity.jsonl, and each step of
 the pass to run-status.json, both in FILE_SORTER_DATA, for the home server's Dashboard (activity.py); the Mac writes neither.
 FILE_SORTER_INBOX, FILE_SORTER_DRIVE_INBOX and FILE_SORTER_ATTACHMENTS_INBOX replace the inboxes for a trial, FILE_SORTER_MODEL the model (haiku),
 FILE_SORTER_DOWNLOADS_MAX_MB the largest download poured into the Drive (50), FILE_SORTER_MIN_AGE the seconds a file must stay unchanged
 before it is handled (60; tests.py sets 0).
 """
-import atexit, fcntl, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, time, unicodedata
+import atexit, fcntl, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, time, unicodedata, urllib.error, urllib.request
 from datetime import datetime
 HOME = os.path.expanduser("~")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -65,6 +69,16 @@ RESULTS = os.path.join(DATA, "results.json")
 APPLIED = os.path.join(DATA, "applied.json")   # Mac: actions already applied, kept 7 days
 CLAUDE = os.environ.get("FILE_SORTER_CLAUDE") or "/opt/homebrew/bin/claude"
 MODEL = os.environ.get("FILE_SORTER_MODEL", "haiku")
+# The files whose text extract() reads go to the local model (no tool: it only answers in SCHEMA), the others to Claude with the Read tool.
+# FILE_SORTER_SHADOW=1 (the server's unit from 04/11/2026): Claude still decides for every file, the local model's answers are only compared.
+LOCAL_URL = os.environ.get("FILE_SORTER_LOCAL_URL", "http://127.0.0.1:11234")
+LOCAL_MODEL = "qwen3.5-9b"   # as the Dashboard's registry of routines names it
+SHADOW = os.environ.get("FILE_SORTER_SHADOW") == "1"
+# A slot of the local model holds 16,384 tokens: the prompt (the tree, rules.md, convention.md, up to 2,500 characters per file: 500 to
+# 1,400 tokens each, figures make them heavier) and the answer (about 100 tokens per file, LOCAL_ANSWER reserved). The batches are measured
+# with the model's own tokenizer, LOCAL_FILES files at most.
+LOCAL_CONTEXT, LOCAL_MARGIN, LOCAL_ANSWER, LOCAL_FILES, LOCAL_TIMEOUT = 16384, 256, 400, 5, 300
+CLAUDE_AI, LOCAL_AI = {"engine": "claude", "model": MODEL}, {"engine": "local", "model": LOCAL_MODEL}   # who decided, for the journal
 MIN_AGE = int(os.environ.get("FILE_SORTER_MIN_AGE", "60"))   # seconds without modification before a file is handled
 MAX_FILES = 15        # per pass
 THRESHOLD = 0.7       # minimum confidence to move a file
@@ -252,21 +266,14 @@ def jpeg_preview(p, jpg):
         subprocess.run(["heif-convert", "-q", "85", p, jpg], capture_output=True, timeout=120)
 
 
-def ask_claude(items, tree):
+def prompt(tree, blocks, local=False):
     # The prompt stays in French on purpose: it carries the owner's French rules and naming convention, and the names
-    # it produces are French. Rewording it would change the names and destinations Claude chooses.
-    blocks = []
-    for p, txt in items:
-        name = os.path.basename(p)
-        if txt:
-            blocks.append(f"### {name}\nExtrait du texte :\n{txt}")
-        elif os.path.splitext(p)[1].lower() in (".heic", ".heif", ".tiff"):
-            jpg = os.path.join(PREVIEWS, re.sub(r"\W", "_", name) + ".jpg")
-            jpeg_preview(p, jpg)
-            blocks.append(f"### {name}\nImage : lis l'aperçu JPEG avec l'outil Read à ce chemin exact : {jpg}")
-        else:
-            blocks.append(f"### {name}\nPas de texte extractible : lis-le avec l'outil Read à ce chemin exact : {p}")
-    prompt = f"""Tu ranges les documents personnels de {SETTINGS['proprietaire']} dans son iCloud Drive.
+    # it produces are French. Rewording it would change the names and destinations the model chooses. The local model gets one
+    # precision on « confiance »: in the mail sorters' prompts it read the word as how legitimate a document is (03/11/2026).
+    confidence = ('- "confiance" : ta certitude sur la destination et le nom que tu proposes, de 0 (au hasard) à 1 (certain). Si tu n\'es pas '
+                  'sûr, mets moins de 0.7 : le fichier restera dans "00 À trier".' if local else
+                  '- "confiance" entre 0 et 1. Si tu n\'es pas sûr, mets moins de 0.7 : le fichier restera dans "00 À trier".')
+    return f"""Tu ranges les documents personnels de {SETTINGS['proprietaire']} dans son iCloud Drive.
 
 Dossiers existants (chemins relatifs, à réutiliser tels quels) :
 {chr(10).join('- ' + f for f in tree)}
@@ -277,7 +284,7 @@ Règles :
 - "nouveau_nom" : TOUJOURS fourni, conforme à la convention ci-dessous (null uniquement si le nom actuel la respecte déjà exactement).
 
 {CONVENTION}
-- "confiance" entre 0 et 1. Si tu n'es pas sûr, mets moins de 0.7 : le fichier restera dans "00 À trier".
+{confidence}
 - "raison" : une phrase courte.
 - Le champ "fichier" doit reprendre EXACTEMENT le nom donné après "###". Réponds pour CHAQUE fichier.
 
@@ -285,8 +292,26 @@ Fichiers à classer :
 
 {chr(10).join(blocks)}
 """
+
+
+def text_block(p, txt):
+    return f"### {os.path.basename(p)}\nExtrait du texte :\n{txt}"
+
+
+def ask_claude(items, tree):
+    blocks = []
+    for p, txt in items:
+        name = os.path.basename(p)
+        if txt:
+            blocks.append(text_block(p, txt))
+        elif os.path.splitext(p)[1].lower() in (".heic", ".heif", ".tiff"):
+            jpg = os.path.join(PREVIEWS, re.sub(r"\W", "_", name) + ".jpg")
+            jpeg_preview(p, jpg)
+            blocks.append(f"### {name}\nImage : lis l'aperçu JPEG avec l'outil Read à ce chemin exact : {jpg}")
+        else:
+            blocks.append(f"### {name}\nPas de texte extractible : lis-le avec l'outil Read à ce chemin exact : {p}")
     dirs = [x for d in (INBOX, DRIVE_INBOX, DOWNLOADS, GMAIL_INBOX, ATTACH_INBOX, PREVIEWS) if os.path.isdir(d) for x in ("--add-dir", d)]
-    cmd = [CLAUDE, "-p", prompt, "--model", MODEL, "--output-format", "json",
+    cmd = [CLAUDE, "-p", prompt(tree, blocks), "--model", MODEL, "--output-format", "json",
            "--json-schema", json.dumps(SCHEMA), "--tools", "Read", "--allowedTools", "Read",
            *dirs, "--strict-mcp-config", "--setting-sources", "project", "--no-session-persistence"]
     env = dict(os.environ, PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
@@ -298,6 +323,81 @@ Fichiers à classer :
     if isinstance(res, str):
         res = json.loads(re.search(r"\{.*\}", res, re.S).group(0))
     return res["fichiers"]
+
+
+def local_call(path, body, timeout=LOCAL_TIMEOUT):
+    req = urllib.request.Request(LOCAL_URL.rstrip("/") + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def local_schema(names):
+    """SCHEMA for the local model, strict: exactly one answer per file, "fichier" one of the names asked, strings of bounded length."""
+    item = {"fichier": {"type": "string", "enum": names}, "destination": {"type": "string", "maxLength": 200},
+            "nouveau_nom": {"type": ["string", "null"], "maxLength": 150}, "confiance": {"type": "number"}, "raison": {"type": "string", "maxLength": 300}}
+    return {"type": "object", "properties": {"fichiers": {"type": "array", "minItems": len(names), "maxItems": len(names), "items": {
+        "type": "object", "properties": item, "required": list(item)}}}, "required": ["fichiers"]}
+
+
+def ask_local(items, tree):
+    """The local model's answers for files with text: ({source: answer}, {source: why it has none, in French}). Batches of LOCAL_FILES files
+    at most, measured with the model's own tokenizer (/tokenize) so that the prompt and its answer fit in a slot; a batch it refuses as too
+    long is split. An unreachable model stops the asking (the next batches would wait as long); an unreadable answer only loses its batch."""
+    if LOCAL_URL in ("", "off"):
+        return {}, {p: "FILE_SORTER_LOCAL_URL=off" for p, _ in items}
+    tag = "shadow: " if SHADOW else ""
+    texts, answers, missing = dict(items), {}, {}
+    try:
+        fixed = len(local_call("/tokenize", {"content": prompt(tree, [], local=True)}, 60)["tokens"])
+        size = {p: len(local_call("/tokenize", {"content": text_block(p, t) + "\n"}, 60)["tokens"]) for p, t in items}
+    except Exception as e:
+        log(f"{tag}local model unreachable: {type(e).__name__} {str(e)[:150]}")
+        return {}, {p: f"injoignable, {type(e).__name__}" for p, _ in items}
+    room = lambda n: LOCAL_CONTEXT - LOCAL_MARGIN - LOCAL_ANSWER * n - 100   # tokens the prompt may take for n files
+    queue, batch = [], []
+    for p, _ in items:
+        if fixed + size[p] > room(1):
+            missing[p] = f"trop long pour un créneau, {fixed + size[p]} tokens"
+            continue
+        if batch and (len(batch) == LOCAL_FILES or fixed + sum(size[q] for q in batch) + size[p] > room(len(batch) + 1)):
+            queue.append(batch)
+            batch = []
+        batch.append(p)
+    queue += [batch] if batch else []
+    while queue:
+        batch = queue.pop(0)
+        names = [os.path.basename(p) for p in batch]
+        body = {"model": "local", "temperature": 0, "max_tokens": LOCAL_ANSWER * len(batch) + 100, "chat_template_kwargs": {"enable_thinking": False},
+                "messages": [{"role": "user", "content": prompt(tree, [text_block(p, texts[p]) for p in batch], local=True)}],
+                "response_format": {"type": "json_schema", "json_schema": {"name": "fichiers", "schema": local_schema(names), "strict": True}}}
+        try:
+            r = local_call("/v1/chat/completions", body)
+            choice = r["choices"][0]
+            if choice.get("finish_reason") == "length":
+                raise ValueError("answer cut at max_tokens")
+            found = match(json.loads(choice["message"]["content"])["fichiers"], batch)
+        except urllib.error.HTTPError as e:
+            if e.code == 400 and len(batch) > 1:   # longer than the slot after all (the chat template's share): asked again in two halves
+                queue[:0] = [batch[:len(batch) // 2], batch[len(batch) // 2:]]
+                continue
+            if e.code == 400:
+                missing.update({p: "refusé par le modèle local, sans doute trop long" for p in batch})
+                continue
+            missing.update({p: f"injoignable, HTTP {e.code}" for p in batch + [q for b in queue for q in b]})
+            log(f"{tag}local model unavailable: HTTP {e.code}, {len(batch) + sum(map(len, queue))} file(s) without its answer")
+            break
+        except OSError as e:   # unreachable, refused or too slow: the next batches would fare no better
+            missing.update({p: f"injoignable, {type(e).__name__}" for p in batch + [q for b in queue for q in b]})
+            log(f"{tag}local model unavailable: {type(e).__name__} {str(e)[:150]}, {len(batch) + sum(map(len, queue))} file(s) without its answer")
+            break
+        except Exception as e:   # an answer that cannot be read: this batch only
+            missing.update({p: f"réponse illisible, {type(e).__name__}" for p in batch})
+            log(f"{tag}local model's answer unreadable for {len(batch)} file(s): {type(e).__name__} {str(e)[:150]}")
+            continue
+        answers.update(found)
+        missing.update({p: "absent de sa réponse" for p in batch if p not in found})
+        log(f"{tag}local model {LOCAL_MODEL}: {len(found)} of {len(batch)} file(s) answered, {(r.get('usage') or {}).get('prompt_tokens')} prompt tokens")
+    return answers, missing
 
 
 def claude_error(r):
@@ -395,41 +495,97 @@ def dedupe(files):
     return keep, duplicates
 
 
-def choose(files):
-    """Claude's decision for each file, validated: [(source, destination or None if the file stays, name, confidence, answer)]."""
-    tree = folders()
-    items = [(p, extract(p)) for p in files]
-    decisions = ask_claude(items, tree)
+def match(decisions, files):
+    """Each answer to its file, by name (simplified: a model may drop an accent); the first answer for a file wins. -> {source: answer}"""
     simple = lambda x: re.sub(r"[^0-9a-z]", "", unicodedata.normalize("NFKD", x).lower())
     by_name = {simple(os.path.basename(p)): p for p in files}
-    answered, choices = set(), []
-    for d in decisions:
-        src = by_name.get(simple(d.get("fichier", "")))
-        if not src or src in answered or not os.path.exists(src):
+    found = {}
+    for d in decisions if isinstance(decisions, list) else []:
+        src = by_name.get(simple(str(d.get("fichier", "")))) if isinstance(d, dict) else None
+        if src and src not in found and os.path.exists(src):
+            found[src] = d
+    return found
+
+
+def outcome(src, d, tree):
+    """A model's answer for a file, checked: (source, destination or None if the file stays, name, confidence, answer)."""
+    name = os.path.basename(src)
+    dest = safe_dest(str(d.get("destination") or ""), tree)
+    c = d.get("confiance")
+    conf = float(c) if type(c) in (int, float) and 0 <= c <= 1 else 0.0
+    if not dest or conf < THRESHOLD:
+        return src, None, name, conf, d
+    new = name
+    keeps_name = dest.startswith("80 Images/Photos") or dest.startswith("80 Images/Captures")   # photos and screenshots keep theirs
+    if d.get("nouveau_nom") and not keeps_name:
+        new = clean_name(str(d["nouveau_nom"]), name)
+    if new == name and not keeps_name and os.path.dirname(src) == ATTACH_INBOX:
+        # an exported attachment's name never follows the convention: no name proposed means the model meant something else
+        # (a copy of another document of the batch, to throw away, which the answer cannot say): the file stays in its inbox
+        return src, None, name, conf, {**d, "_copy": True}
+    return src, dest, new, conf, d
+
+
+def described(o):
+    """What an answer would do, for a « shadow: » line."""
+    _, dest, new, conf, d = o
+    return f"{dest}/{new} ({conf:.2f})" if dest else f"stays ({conf:.2f}, proposed « {d.get('destination')} »)"
+
+
+def compare(texts, claude, local, missing, tree):
+    """FILE_SORTER_SHADOW=1: the local model's answer for each file with text next to Claude's, which decides. One « shadow: » line per file
+    they would not file the same way (folder or name, after the same checks), then a summary. Nothing else: no action, no event."""
+    same = differ = none = 0
+    for p, _ in texts:
+        if p not in claude:
             continue
-        answered.add(src)
-        name = os.path.basename(src)
-        dest = safe_dest(d.get("destination", ""), tree)
-        conf = float(d.get("confiance", 0))
-        if not dest or conf < THRESHOLD:
-            choices.append((src, None, name, conf, d))
+        name, h = os.path.basename(p), outcome(p, claude[p], tree)
+        if p not in local:
+            none += 1
+            log(f"shadow: {name}  {MODEL}={described(h)}  local=no answer ({missing.get(p, '?')})")
             continue
-        new = name
-        keeps_name = dest.startswith("80 Images/Photos") or dest.startswith("80 Images/Captures")   # photos and screenshots keep theirs
-        if d.get("nouveau_nom") and not keeps_name:
-            new = clean_name(d["nouveau_nom"], name)
-        if new == name and not keeps_name and os.path.dirname(src) == ATTACH_INBOX:
-            # an exported attachment's name never follows the convention: no name proposed means the model meant something else
-            # (a copy of another document of the batch, to throw away, which the answer cannot say): the file stays in its inbox
-            choices.append((src, None, name, conf, {**d, "_copy": True}))
-            continue
-        choices.append((src, dest, new, conf, d))
-    for p in files:
-        if p not in answered:
-            log(f"SANS RÉPONSE {os.path.basename(p)}  (retried on the next pass)")
-            activity.log("sans réponse", os.path.basename(p), src=where(os.path.dirname(p)), engine="claude", model=MODEL,
-                         detail="le modèle n'a rien répondu pour ce fichier : nouvel essai au prochain passage")
-    return choices
+        q = outcome(p, local[p], tree)
+        if (h[1], nfc(h[2])) == (q[1], nfc(q[2])):
+            same += 1
+        else:
+            differ += 1
+            log(f"shadow: {name}  {MODEL}={described(h)}  local={described(q)}")
+    if same + differ + none:
+        log(f"shadow: {same + differ + none} file(s) with text compared: {same} the same, {differ} different, {none} without a local answer")
+
+
+def choose(files):
+    """The decision for each file, validated: ([(source, destination or None if the file stays, name, confidence, answer, who decided)],
+    Claude's failure or None, the number of files the local model left without an answer). Files with text go to the local model, the
+    others to Claude; with FILE_SORTER_SHADOW=1 Claude decides for every file and the local model is only compared. A file nobody answered
+    stays where it is, « sans réponse », and is asked about again at the next pass. When Claude fails, the files it was asked about wait
+    too, and the caller fails the pass once the others are done."""
+    tree = folders()
+    items = [(p, extract(p)) for p in files]
+    texts = [(p, t) for p, t in items if t]
+    to_claude = items if SHADOW else [(p, t) for p, t in items if not t]
+    local, missing = ask_local(texts, tree) if texts else ({}, {})
+    claude, failure = {}, None
+    if to_claude:
+        try:
+            claude = match(ask_claude(to_claude, tree), [p for p, _ in to_claude])
+        except Exception as e:
+            failure = e
+    if SHADOW:
+        if not failure:
+            compare(texts, claude, local, missing, tree)
+        decided, unanswered = {p: (d, CLAUDE_AI) for p, d in claude.items()}, {}
+    else:
+        decided = {**{p: (d, LOCAL_AI) for p, d in local.items()}, **{p: (d, CLAUDE_AI) for p, d in claude.items()}}
+        unanswered = {p: (LOCAL_AI, why) for p, why in missing.items()}
+    if not failure:
+        unanswered.update({p: (CLAUDE_AI, None) for p, _ in to_claude if p not in claude})
+    for p, (ai, why) in unanswered.items():
+        log(f"SANS RÉPONSE {os.path.basename(p)}  ({f'local model: {why}; ' if why else ''}retried on the next pass)")
+        activity.log("sans réponse", os.path.basename(p), src=where(os.path.dirname(p)), **ai,
+                     detail=(f"pas de réponse du modèle local ({why})" if why else "le modèle n'a rien répondu pour ce fichier") + " : nouvel essai au prochain passage")
+    choices = [outcome(p, decided[p][0], tree) + (decided[p][1],) for p in files if p in decided]
+    return choices, failure, sum(ai is LOCAL_AI for ai, _ in unanswered.values())
 
 
 def main():
@@ -474,7 +630,8 @@ def audit():
 
 
 def batch(files, moved, kept):
-    for src, dest, new, conf, d in choose(files):
+    choices, failure, _ = choose(files)
+    for src, dest, new, conf, d, _ai in choices:
         name = os.path.basename(src)
         if dest is None:
             if os.path.dirname(src) != ATTACH_INBOX:   # a doubtful attachment stays in its inbox, without a notification
@@ -497,6 +654,8 @@ def batch(files, moved, kept):
         shutil.move(src, target)
         moved.append(f"{new} → {dest}")
         log(f"RANGÉ   {name}  ->  {'Drive/' if base == DRIVE else ''}{os.path.relpath(target, base)}  ({conf:.2f}) — {d.get('raison')}")
+    if failure:   # Claude failed for the files it was asked about: they wait, the pass reports the error
+        raise failure
 
 
 # ---- decision on the server, move on the Mac ----
@@ -689,7 +848,7 @@ def decide():
     except OSError:
         return
     signal.signal(signal.SIGTERM, stopped)
-    failures, in_drive, later = [], [], []   # later: (action, object, fields) of the plan's events
+    failures, in_drive, later, failure = [], [], [], None   # later: (action, object, fields) of the plan's events; failure: Claude's
     try:
         REPORT.running("inboxes")
         plan = read_json(PLAN, {"actions": [], "faites": {}})
@@ -749,11 +908,12 @@ def decide():
             REPORT.set("decide", "skipped")
         else:
             REPORT.running("decide")
-            choices = choose(files)
-            REPORT.set("decide", "ok")
-            for src, dest, new, conf, d in choices:
+            choices, failure, waiting = choose(files)
+            REPORT.set("decide", *(("failed", f"le modèle local n'a pas répondu pour {waiting} fichier(s) : nouvel essai au prochain passage")
+                                   if waiting else ("ok",)))
+            for src, dest, new, conf, d, model in choices:
                 name, origin = os.path.basename(src), where(os.path.dirname(src))
-                ai = {"engine": "claude", "model": MODEL, "confidence": conf}
+                ai = {**model, "confidence": conf}
                 if dest is None:
                     signature = sig(src)   # before a move: the mount may stop showing the file at once
                     why = kept_why(conf, d)
@@ -790,6 +950,9 @@ def decide():
         REPORT.set("plan", "ok" if actions else "skipped")
         for action, obj, fields in later + downloads_events(results.get("telechargements") or []):
             activity.log(action, obj, **fields)
+        if failure:   # Claude failed: the files it was asked about wait; the others are done and the plan is written
+            REPORT.running("decide")
+            raise failure
         activity.recovered("passage du tri")
     except Exception as e:
         log(f"ERREUR  {e}")

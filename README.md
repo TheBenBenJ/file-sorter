@@ -2,7 +2,7 @@
 
 *Formerly `tri-icloud` (renamed on 03/11/2026, with its folders, log and environment variables; its scripts, files, options and subcommands got English names the same day).*
 
-Automatic filing of personal documents into a numbered folder tree on iCloud Drive (and Google Drive for office files). Claude proposes a destination and a clean name for each new file; a plain Python script validates the proposal and moves the file. Nothing is ever overwritten, and when in doubt the file stays where it is.
+Automatic filing of personal documents into a numbered folder tree on iCloud Drive (and Google Drive for office files). A model proposes a destination and a clean name for each new file (a local model for the files whose text can be read, Claude for scans and images); a plain Python script validates the proposal and moves the file. Nothing is ever overwritten, and when in doubt the file stays where it is.
 
 Why: documents arrive from many places (the phone, the browser's Downloads, invoices received by mail) and end up as `Document (1).pdf` in a pile. Filing them by hand is a chore; letting an AI move files on its own is a risk. Here the AI only reads and proposes, and the script decides.
 
@@ -12,7 +12,7 @@ The code, its file names and its options are in English. The documents' folders 
 
 Inboxes: Google Drive `00 À trier`, the main one (the Mac pours the documents of its `~/Downloads` into it); Google Drive `00 Factures entrantes`, filled every hour by an Apps Script that imports invoices from Gmail (`gmail-invoices.gs`, kept out of this repo); iCloud `00 À trier`, where the phone's downloads land (on an iPhone, neither Safari nor Shortcuts can choose a Google Drive folder); and, read last, Google Drive `00 Pièces jointes`, where the owner's mail sorter (a separate, private repo) exports every document attached to his mails, received and sent, once per content, named `<date of the mail> <subject> - <original name>` so that the date and the subject help the decision.
 
-For each file at least 60 seconds old (15 per pass): a short text extract (`pdftotext`, `textutil`, the XML inside office files) or an image preview, then one `claude -p` call with the Read tool only. Claude answers in JSON for each file: destination, new name, confidence, reason. The script validates and acts:
+For each file at least 60 seconds old (15 per pass): a short text extract (`pdftotext`, `textutil`, the XML inside office files) or an image preview, then the files with text go to a local model (an OpenAI-compatible API, `FILE_SORTER_LOCAL_URL`: on the home server, llama.cpp's `llama-server` with Qwen 3.5 9B; no tool, a strict JSON schema, a few files per question) and the others (scans, images: the local model reads no image) to one `claude -p` call with the Read tool only. The model answers in JSON for each file: destination, new name, confidence, reason. With `FILE_SORTER_SHADOW=1` (the home server's setting from 04/11/2026, until the owner lifts it), Claude still decides for every file and the local model's answers for the files with text are only compared: each file they would not file the same way, folder or name, is a `shadow:` line of the log. The script validates and acts:
 
 - confidence below 0.7, or a destination outside the existing tree (one new sub-folder level is allowed): the file stays in its `00 À trier` (an invoice from Gmail, or a download in the original mode, is moved to the Drive's; a mail attachment stays in `00 Pièces jointes`) and is remembered in `kept.json` so it is not asked about again;
 - never overwrite: a name already taken gets ` (2)`;
@@ -30,7 +30,7 @@ For each file at least 60 seconds old (15 per pass): a short text extract (`pdft
  Drive 00 À trier ──────┐ read-only mounts
  Drive 00 Factures ─────┤
    entrantes            ├─► sort.py --decide ──┬─► inside the Drive, itself (rclone):
- iCloud 00 À trier ─────┤    (Claude, Read)    │   editable files filed, doubtful invoices
+ iCloud 00 À trier ─────┤ (local model, Claude)│   editable files filed, doubtful invoices
  Drive 00 Pièces ───────┘                      │   into 00 À trier, duplicates to its trash
    jointes (mails)                             │
                                                └─► plan.json ───────── pulled ──────► sort.py --apply
@@ -56,7 +56,7 @@ Plan actions (`plan.json`): `ranger` (file it at `cible`), `doublon` (to the Tra
 
 ## Setup
 
-Requirements: Python 3.9+ (standard library only), the Claude Code CLI (`claude`), `pdftotext` (poppler). On macOS, `trash`, `brctl`, `sips` and `textutil` come with the system; on Linux, `heif-convert` (libheif) reads iPhone photos.
+Requirements: Python 3.9+ (standard library only), a local model behind an OpenAI-compatible API with its `/tokenize` (llama.cpp's `llama-server`) for the files with text, the Claude Code CLI (`claude`) for the others, `pdftotext` (poppler). On macOS, `trash`, `brctl`, `sips` and `textutil` come with the system; on Linux, `heif-convert` (libheif) reads iPhone photos.
 
 ```sh
 cp settings.example.json settings.json   # owner description, Drive path, folders where loose files are fine
@@ -78,8 +78,10 @@ python3 sort.py --dry-run
 | `FILE_SORTER_ATTACHMENTS_INBOX` | another inbox of mail attachments, for a trial | Drive `00 Pièces jointes` |
 | `FILE_SORTER_DRIVE_RCLONE` | server: rclone remote allowed to write the Drive (`gsort:`); unset, only the Mac moves | unset |
 | `FILE_SORTER_DOWNLOADS_MAX_MB` | largest download poured into the Drive | `50` |
-| `FILE_SORTER_CLAUDE` | `claude` binary | `/opt/homebrew/bin/claude` |
-| `FILE_SORTER_MODEL` | model | `haiku` |
+| `FILE_SORTER_CLAUDE` | `claude` binary, for the files without text (and every file in shadow mode) | `/opt/homebrew/bin/claude` |
+| `FILE_SORTER_MODEL` | Claude's model | `haiku` |
+| `FILE_SORTER_LOCAL_URL` | the local model (OpenAI API) for the files with text; `off`: none, those files wait (`SANS RÉPONSE`) | `http://127.0.0.1:11234` |
+| `FILE_SORTER_SHADOW` | `1`: Claude decides for every file, the local model's answers are only compared (`shadow:` lines) | unset: the local model decides for the files with text |
 | `FILE_SORTER_MIN_AGE` | seconds a file must stay unchanged before it is handled (a trial; `tests.py` sets 0) | `60` |
 
 `rename.py` and `apply_plan.py` also read `ROOT` (another root, e.g. the Drive), and `rename.py` reads `SUFFIX` (separate plan files), `EXCLUDED` (folders to skip, separated by `|`) and `DOCS_ONLY` (rename documents only).
@@ -90,19 +92,19 @@ The file names above are shared between the server, the Mac and a dashboard, and
 
 ## Operations and troubleshooting
 
-Checks after any change: `python3 -I tests.py` (offline: a sandbox with the example settings, a fake `claude` and a fake `rclone`; the CI runs it too).
+Checks after any change: `python3 -I tests.py` (offline: a sandbox with the example settings, a fake `claude`, a fake local model and a fake `rclone`; it also measures the local model's questions against its slot; the CI runs it too).
 
 Activity journal and step report (`sort.py --decide` only: the server is their single writer; the Mac writes neither), for the System tab of the owner's dashboard, in `FILE_SORTER_DATA`:
 
 - `activity.jsonl`: one JSON event per line, appended: `{"time", "action", "object", "from", "to", "detail", "engine", "model", "confidence", "run"}`, French actions and texts: `rangé` (the destination, the new name included, the model's reason), `renommé` (old name → new name), `doublon` (the original it repeats), `gardé` (left in its inbox, with the reason), `à trier` (a doubtful invoice moved to the Drive's `00 À trier`), `sans réponse`, `échec` (a move in the Drive, or a whole pass: once per series of failed passes, then `rétabli`), and, read back from `results.json` at the next pass, what the Mac did: `rangé par le Mac`, `doublon jeté par le Mac`, `déposé par le Mac`, `mis à trier par le Mac`, `annulé` (the file was gone or had changed) or `échec` with its error. The decisions the Mac carries out are logged once `plan.json` is written, so a pass that fails before is not logged twice. File names are allowed there, never in a notification. Mode 600; past 5 MB, rewritten with the last 90 days (20,000 lines at most). A write that fails never stops the pass.
 - `run-status.json`: `{"time": start of the pass, "steps": {"inboxes", "decide", "drive", "plan", "icloud": "ok" | "skipped" | "running" | "failed: <message>"}}`, the workflow's steps, rewritten atomically at each change: a pass that fails, or that systemd stops, shows the step it was at. `icloud` speaks of the Mac's results read at this pass; while the Mac has actions to apply and nothing came back, it has no state. Messages are French and never name a file.
 
-Logs: on the Mac `~/Library/Logs/file-sorter.log`; on the server the service journal. Each line starts with a French keyword that docs and habits search for: `RANGÉ` (filed), `GARDÉ` (left in `00 À trier`), `DOUBLON` (duplicate to the Trash), `DÉPOSÉ` (document written), `VERSÉ` (a download poured into the Drive's `00 À trier`), `LAISSÉ` (a download that is not a document, left in Downloads), `PLAN` (server decision), `MAC` (status returned by the Mac), `ERREUR`, `SANS RÉPONSE` (no answer for that file, retried), `ATTENTE` (file or folder not available yet, retried), `TROP GROS`, `À DÉPOSER`. Notifications are French too: macOS notifications on the Mac, a `notifier` command on the server.
+Logs: on the Mac `~/Library/Logs/file-sorter.log`; on the server the service journal. Each line starts with a French keyword that docs and habits search for: `RANGÉ` (filed), `GARDÉ` (left in `00 À trier`), `DOUBLON` (duplicate to the Trash), `DÉPOSÉ` (document written), `VERSÉ` (a download poured into the Drive's `00 À trier`), `LAISSÉ` (a download that is not a document, left in Downloads), `PLAN` (server decision), `MAC` (status returned by the Mac), `ERREUR`, `SANS RÉPONSE` (no answer for that file, retried; the local model's reason when it was asked), `shadow:` (`FILE_SORTER_SHADOW=1`: a file the local model would file otherwise, the size of each of its questions in tokens, a summary of each pass), `ATTENTE` (file or folder not available yet, retried), `TROP GROS`, `À DÉPOSER`. Notifications are French too: macOS notifications on the Mac, a `notifier` command on the server.
 
 | Symptom | Cause | Remedy |
 |---|---|---|
 | « Resource deadlock avoided » (Errno 11) | the iCloud or Drive file is only in the cloud, and a launchd job may not download it by default | `sort.py` allows itself to (`setiopolicy_np`, at start on the Mac); `materialize()` also asks `brctl download` for iCloud and retries on the next pass |
-| A file is never filed | it was left (`GARDÉ`) or Claude skipped it (`SANS RÉPONSE`) | read the log; remove its line from `kept.json` (server: `name|size`, Mac: `name|size|mtime`) to have it examined again |
+| A file is never filed | it was left (`GARDÉ`), or the model skipped it or did not answer (`SANS RÉPONSE`: with the local model, its reason, for example `injoignable` or `trop long pour un créneau`) | read the log; remove its line from `kept.json` (server: `name|size`, Mac: `name|size|mtime`) to have it examined again |
 | A file waits in `00 À trier` | Mac asleep, plan not fetched yet, mounts a few minutes behind | wait for the next pass, or run the relay by hand; an action not returned within 7 days is dropped by the server |
 | A rule or convention change has no effect | the server has its own copy of the personal files | copy `settings.json`, `rules.md` and `convention.md` to the server again |
 
@@ -113,15 +115,15 @@ Before deploying a change: `python3 -I -m py_compile sort.py`, then `python3 -I 
 ## Security
 
 - No secrets in the repo. Personal files (`settings.json`, `rules.md`, `convention.md`, `kept.json`, `gmail-invoices.gs`) and all state files are ignored by git, under their former French names too; the `*.example.*` files show their format.
-- Documents are untrusted input, and a document can try to give instructions. Claude runs with `--tools Read --allowedTools Read` (it can read, not write, move or run anything), `--strict-mcp-config` with no MCP server (no connectors: no mail, no drive, no web), `--setting-sources project` (no user settings, hooks or permissions), `--no-session-persistence`, and `--add-dir` limited to the inboxes and the preview folder. Its answer is data that the script checks; the worst a crafted document can do is get itself filed in a wrong existing folder or left in the inbox.
+- Documents are untrusted input, and a document can try to give instructions. Claude runs with `--tools Read --allowedTools Read` (it can read, not write, move or run anything), `--strict-mcp-config` with no MCP server (no connectors: no mail, no drive, no web), `--setting-sources project` (no user settings, hooks or permissions), `--no-session-persistence`, and `--add-dir` limited to the inboxes and the preview folder. The local model gets no tool at all: it only answers in a strict JSON schema (one answer per file, the names of the files asked as a closed list, strings of bounded length), at temperature 0 and without thinking. Either answer is data that the script checks the same way; the worst a crafted document can do is get itself filed in a wrong existing folder, under a wrong cleaned name, or left in the inbox.
 - The server reads through read-only mounts and cannot write into iCloud. In the Drive it writes only through `sort.py`'s own calls: a file of an inbox moved into the tree (the destination validated as for the Mac: an existing folder or one new level, a cleaned name, never an inbox; the name checked against Google first, so nothing is overwritten), a doubtful invoice moved into `00 À trier`, or a duplicate sent to the Drive's trash; nothing is deleted for good. Google has no narrower grant than the whole Drive for files the server did not create, so the grant is kept in the server account that runs the sorting and nowhere else.
 - The Mac checks every action again: paths must stay inside iCloud or the Drive, the source must be in an inbox, the target never an inbox, and the size must not have changed since the decision.
 - Server notifications go to a public push service, so they never contain file names.
-- Text extracts (up to 2,500 characters) and unreadable files are sent to Claude: judge whether that suits your documents.
+- Text extracts (up to 2,500 characters) go to the local model, which keeps them on the machine that runs it, and to Claude too in shadow mode; unreadable files go to Claude: judge whether that suits your documents.
 
 ## Design decisions
 
-- **The model proposes, the script decides.** Rather than letting an agent move files with write tools, Claude only reads and answers in a fixed JSON schema; the script accepts only existing folders (plus one new level), a confidence of at least 0.7, cleaned names and never an overwrite. Doubt means the file stays.
+- **The model proposes, the script decides.** Rather than letting an agent move files with write tools, the model only reads and answers in a fixed JSON schema; the script accepts only existing folders (plus one new level), a confidence of at least 0.7, cleaned names and never an overwrite. Doubt means the file stays.
 - **The server decides, the Mac moves** (adopted on 03/11/2026, the owner's idea), **and the server files the Drive itself** (the owner's decision the same afternoon). The main inbox is in the Drive, where the Mac pours its downloads (the phone's land in iCloud's inbox, the only kind of folder iOS lets Safari and Shortcuts choose): editable documents stay in the Drive and are filed there by the server, even with the Mac asleep; finished documents go to iCloud, the archive, through the Mac. Rejected: the server writing into iCloud with rclone, whose iCloud backend is still experimental and whose repeated failures could lock the Apple account. Cost: a grant on the whole Drive on the server (see Security), and finished documents still wait for the Mac.
 - **Downloads: documents only, 50 MB at most.** Everything poured into the Drive is uploaded, and a finished document comes back down when the Mac files it in iCloud: installers, archives and videos have no place in the archive, and a big file would cost two transfers for nothing. They stay in Downloads, never deleted by the sorting, and the dashboard lists them after a week.
 - **Idempotent plan.** Action ids come from the content (type, path, size); the Mac remembers applied ids for 7 days (`applied.json`), so a plan fetched twice is applied once; the server drops actions never returned within a week and remembers handled sources for an hour, because the mounts show changes a few minutes late.
@@ -130,7 +132,8 @@ Before deploying a change: `python3 -I -m py_compile sort.py`, then `python3 -I 
 - **Downloads go through the Drive's `00 À trier`.** The server cannot see the Mac's Downloads; pouring them into the single inbox keeps one place where decisions are made.
 - **Duplicates by size, then SHA-1**: only files of the same size are hashed, which keeps the walk of iCloud cheap.
 - **One lock per data folder**: a pass that finds another running exits; `--deposit` waits for the lock, so a report is never lost.
-- **Haiku, 15 files per call**: cheap and fast enough for a pass every 5 minutes; a pass loops until the inboxes are empty.
+- **The local model for the files with text, Claude for the others** (04/11/2026, the owner's decision): the routines that only classify lines of text left Claude for the home server's model, free and independent of the subscription's usage window (on 03/11/2026 sessions had used it up for three hours); file sorting follows for the files whose text `extract()` reads. Scans, images and HEIC previews stay with Claude and its Read tool: the local model reads no image, and OCR was declined. The local model starts in shadow mode (`FILE_SORTER_SHADOW=1` in the server's unit): Claude decides, and each disagreement on the folder or the name is logged, so that the owner judges it on real files first. Lifting the shadow means removing that line from the unit; the files with text then never reach Claude, even when the local model does not answer: they wait, `SANS RÉPONSE`.
+- **15 files per pass**: Claude (Haiku) reads the files without text in one call; the local model gets up to 5 files with text per question, measured with its own tokenizer against its slot of 16,384 tokens, the tree, `rules.md` and `convention.md` taking their share (5 files with a usual tree, 3 with a very big one, in the tests); a question it still refuses as too long is asked again in halves. A pass loops until the inboxes are empty.
 - **French where it is a contract**: the prompt and its answer keys (the names must stay French), the keys and values inside the plan and result files exchanged between two machines updated separately, the log keywords and the notifications. The code was translated to English on 03/11/2026 without changing any of them.
 - **English names for files, options and subcommands** (03/11/2026, the owner's wish: everything technical in English). A file name has a few known readers (the Mac relay, the server's units, the dashboard, two skills), so the names changed in one switch together with those readers and the files on both machines. The JSON keys stayed French: they live inside the files the two machines exchange, so changing them would need both sides to read both forms for a while. An unknown option now stops `sort.py` (it used to fall back to the full mode, which decides and moves), and an unknown command stops `apply_plan.py` (it used to only check): a caller left with a former name fails loudly.
 
