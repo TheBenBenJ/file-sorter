@@ -115,14 +115,18 @@ THEME = re.compile(r"\d\d ")   # the theme folders are the numbered ones of the 
 REVIEW = os.path.join(DATA, "review.json")
 REVIEW_KINDS = ("archiver", "supprimer")   # the plan's actions of the review (the Mac moves into iCloud's archive or to its Trash)
 DECISIONS = ("garder", "archiver", "supprimer")
-REVIEW_THRESHOLD = {"archiver": 0.8, "supprimer": 0.9}   # below, the document stays where it is
+# From REVIEW_LEAVE, a document the model wants out of its theme folder leaves it: to the trash from REVIEW_TRASH, else into the archive,
+# where nothing is lost; below REVIEW_LEAVE it stays (the owner's choice of 05/11/2026, ticket 14: with 0.8 to archive and 0.9 to trash,
+# four lesser copies of a replaced identity card stayed while their best one went to the archive).
+REVIEW_LEAVE, REVIEW_TRASH = 0.7, 0.9
+REVIEW_RULES = 2            # the version of these rules in review.json: a document left in place by former ones is asked again
 REVIEW_EXT = OFFICE + (".pdf", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff", ".rtf", ".pages", ".numbers", ".key", ".txt")
 REVIEW_VISUAL = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif")   # without text, Claude reads these (HEIC through a JPEG)
 REVIEW_FILES = 10           # documents asked about per pass, one folder at a time; a folder of 10 or fewer is always read whole
 REVIEW_APPLY = 40           # decisions applied per pass at most (once the trial is lifted, the trial's own first)
 REVIEW_CHARS = 1200         # of each document's text: enough to tell what it is
 REVIEW_LISTING = 150        # names of the folder given as context, at most
-REVIEW_MIN_AGE = 2 * 86400  # a document modified in the last two days is left for later
+REVIEW_MIN_AGE = 3 * 3600   # a document modified in the last three hours is left for later: being written, or just saved (two days until 05/11/2026)
 REVIEW_AGAIN = 180 * 86400  # a document is read again after six months: what was current may not be any more
 REVIEW_RETRIES = (3600, 86400, 30 * 86400)   # a document left without an answer is asked again an hour later, then a day, then a month
 REVIEW_REST = 3600          # once every folder is read, the next walk an hour later at the earliest
@@ -942,10 +946,11 @@ def _public_reason(e, step):
 # ---- the review of the theme folders: each document already filed is kept, archived or trashed (--decide only) ----
 # Its state, review.json in FILE_SORTER_DATA, is the server's own (English keys): "files", each document read, by "root|path|size" (path
 # relative to the root, NFC): {"path": its real relative path, "decision", "confidence", "reason", "twin": the real path of the copy kept,
-# "engine", "model", "time", "state": kept | pending (to archive or trash: a proposal of the trial, or waiting for the Mac) | done | failed |
-# unanswered, "tries": how many questions left it without an answer}; "cursor": the last folder read entirely; "rest_until", "pause_until";
-# "sweep": the counts of the walk under way; "first_sweep": when the first walk over every folder ended (its end is notified once);
-# "withdrawn": {action id: {"action", "time"}}, the plan's actions taken back when the review stopped, a week long.
+# "engine", "model", "proposal": the model's own decision (since 05/11/2026 evening), "time", "state": kept | pending (to archive or trash:
+# a proposal of the trial, or waiting for the Mac) | done | failed | unanswered, "tries": how many questions left it without an answer};
+# "cursor": the last folder read entirely; "rest_until", "pause_until"; "sweep": the counts of the walk under way; "first_sweep": when the
+# first walk over every folder ended (its end is notified once); "withdrawn": {action id: {"action", "time"}}, the plan's actions taken back
+# when the review stopped, a week long; "rules": the version of the rules the decisions were taken under (REVIEW_RULES; none: the first).
 
 # The review's answer format. The keys are French, like the filing's: "raison" comes first, so that the model says why before it decides.
 REVIEW_SCHEMA = {"type": "object", "required": ["fichiers"], "properties": {"fichiers": {"type": "array", "items": {
@@ -966,9 +971,10 @@ def review_prompt(root, folder, files, archive, blocks, local=False):
     # French on purpose, like the filing's prompt: the owner's documents, folders and rules are French. What is current, what is kept as a
     # proof and what is of no use are the owner's words (ticket 14 of 05/11/2026: temporary files, several identity cards, mail
     # attachments, terms of sale); his rules.md comes after and may add his own.
-    confidence = ('- "confiance" : ta certitude sur cette décision, de 0 (au hasard) à 1 (certain). Si tu n\'es pas sûr, mets moins de 0.8 : '
-                  'le fichier restera en place.' if local else
-                  '- "confiance" entre 0 et 1. Si tu n\'es pas sûr, mets moins de 0.8 : le fichier restera en place.')
+    # The same scale as before 05/11/2026 evening, so that the models' certainty means what it meant; what the script does with it (REVIEW_LEAVE,
+    # REVIEW_TRASH) is not theirs to weigh.
+    confidence = ('- "confiance" : ta certitude sur cette décision, de 0 (au hasard) à 1 (certain). Si tu n\'es pas sûr, mets moins de 0.8.' if local else
+                  '- "confiance" entre 0 et 1. Si tu n\'es pas sûr, mets moins de 0.8.')
     return f"""Tu fais le ménage dans les documents personnels de {SETTINGS['proprietaire']}, rangés par thèmes dans son {'Google Drive' if root == 'drive' else 'iCloud Drive'}. Nous sommes le {datetime.now():%d/%m/%Y}.
 Les dossiers par thèmes ne gardent que ce qui sert encore ; le reste part dans « {archive} » (au même chemin) ou à la corbeille.
 
@@ -1068,19 +1074,20 @@ def listing(docs, chunk):
 
 def judge(decided, groups, copies):
     """The review's decisions once checked: {document: (decision, confidence, the copy kept in its place or None, reason, who decided,
-    the decision proposed when it was not followed)}. An unknown decision, or one below its threshold, keeps the document. A copy (named
-    so in doublon_de, or by its full name in its reason) is trashed only when the one kept was in the same question (the model saw both),
-    is named unambiguously, and is not trashed itself; the exact copies (copies, same bytes) always are."""
+    the decision proposed when it was not followed, the model's own decision)}. An unknown decision, or one below REVIEW_LEAVE, keeps the
+    document. A copy (named so in doublon_de, or by its full name in its reason) leaves only when the one kept was in the same question (the
+    model saw both), is named unambiguously, and does not leave as a copy itself; the exact copies (copies, same bytes) always do. Last, the
+    trash needs REVIEW_TRASH: a document the model wants to trash with less certainty goes to the archive instead."""
     together = {p: g for g in groups for p in g}
     order = sorted(decided, key=lambda p: nfc(os.path.basename(p)).lower())
     out = {}
     for p in order:
         d, ai = decided[p]
-        decision = d.get("decision") if d.get("decision") in DECISIONS else "garder"
+        decision = wanted = d.get("decision") if d.get("decision") in DECISIONS else "garder"
         c = d.get("confiance")
         conf = float(c) if type(c) in (int, float) and 0 <= c <= 1 else 0.0
         reason, kept, proposed = str(d.get("raison") or "").strip().rstrip("."), None, None
-        if decision != "garder" and conf < REVIEW_THRESHOLD[decision]:
+        if decision != "garder" and conf < REVIEW_LEAVE:
             decision, proposed = "garder", f"{decision}, pas assez sûr"
         others, cited = [x for x in together.get(p, ()) if x != p], []
         if decision == "supprimer" and d.get("doublon_de"):
@@ -1093,14 +1100,17 @@ def judge(decided, groups, copies):
                 kept = cited[0] if len(cited) == 1 or (cited and len(os.path.basename(cited[0])) > len(os.path.basename(cited[1]))) else None
                 if not kept:
                     decision, proposed = "garder", "supprimer comme copie, sans nommer le fichier gardé"
-        out[p] = [decision, conf, kept, reason, ai, proposed, cited]
-    for p in order:   # a document trashed while the one it names (its kept copy, or a file its reason cites) is trashed too stays
+        out[p] = [decision, conf, kept, reason, ai, proposed, wanted, cited]
+    for p in order:   # a document leaving while the one it names (its kept copy, or a file its reason cites) leaves too that way stays
         v = out[p]
-        if v[0] == "supprimer" and any(out.get(x, ["garder"])[0] == "supprimer" for x in ([v[2]] if v[2] else v[6])):
+        if v[0] == "supprimer" and any(out.get(x, ["garder"])[0] == "supprimer" for x in ([v[2]] if v[2] else v[7])):
             v[0], v[2], v[5] = "garder", None, "supprimer, mais l'autre exemplaire part aussi"
+    for v in out.values():   # wanted out, not certain enough for the trash: into the archive, where nothing is lost
+        if v[0] == "supprimer" and v[1] < REVIEW_TRASH:
+            v[0], v[5] = "archiver", "supprimer, pas assez sûr pour la corbeille"
     for p, kept in copies.items():
-        out[p] = ["supprimer", 1.0, kept, f"copie identique de « {os.path.basename(kept)} »", None, None]
-    return {p: tuple(v[:6]) for p, v in out.items()}
+        out[p] = ["supprimer", 1.0, kept, f"copie identique de « {os.path.basename(kept)} »", None, None, None]
+    return {p: tuple(v[:7]) for p, v in out.items()}
 
 
 class Review:
@@ -1121,8 +1131,25 @@ class Review:
             state["cursor"] = None
         state["withdrawn"] = {k: w for k, w in (state.get("withdrawn") or {}).items()
                               if isinstance(w, dict) and isinstance(w.get("action"), dict) and w["action"].get("id") == k}
+        migrated = state.get("rules", 1) < REVIEW_RULES
+        if migrated:
+            # A folder where a document was kept under former rules with a certainty the present ones act on (from REVIEW_LEAVE, below
+            # REVIEW_TRASH) is read again whole, at once: review.json did not keep what the model had proposed, and a copy leaves only when
+            # the one kept in its place is in the same question. Its decisions stand until then (a proposal already in the journal is not
+            # logged twice); the walk starts over from the first folder, a folder with nothing due being passed in the same pass.
+            where = lambda k, e: (k.split("|", 1)[0], nfc(os.path.dirname(e["path"])))
+            again = {where(k, e) for k, e in state["files"].items() if e.get("decision") == "garder" and e.get("state") == "kept" and e.get("engine")
+                     and type(e.get("confidence")) in (int, float) and REVIEW_LEAVE <= e["confidence"] < REVIEW_TRASH}
+            due = [e for k, e in state["files"].items() if where(k, e) in again]
+            for e in due:
+                e["time"] = 0
+            if again:
+                state["cursor"] = None
+                state.pop("rest_until", None)
+                log(f"review: new rules, {len(again)} folder(s) read again whole ({len(due)} document(s)), where documents stayed for lack of certainty")
+            state["rules"] = REVIEW_RULES
         self.state, self.files, self.withdrawn = state, state["files"], state["withdrawn"]
-        self.read_as = None if broken else json.dumps(state, sort_keys=True)   # a broken file is written again at once
+        self.read_as = None if broken or migrated else json.dumps(state, sort_keys=True)   # a broken or migrated one is written again at once
         self.actions, self.later, self.planned, self.by_server = actions, later, set(), None
         self.roots, self.index = {}, None   # which roots show their theme folders; the entries by folder (both once per pass)
 
@@ -1154,10 +1181,12 @@ class Review:
         return self.now - e.get("time", 0) >= wait
 
     def why(self, e):
-        """A decision's reason, as the journal says it."""
+        """A decision's reason, as the journal says it; for a document the model wanted to trash, why it goes to the archive instead."""
         reason = e.get("reason") or ""
         if e.get("twin") and not reason.startswith("copie identique"):
-            return f"copie moins bonne de « {os.path.basename(e['twin'])} »" + (f" : {reason}" if reason else "")
+            reason = f"copie moins bonne de « {os.path.basename(e['twin'])} »" + (f" : {reason}" if reason else "")
+        if e.get("decision") == "archiver" and e.get("proposal") == "supprimer":
+            reason = (reason or "décision du modèle") + " ; à l'archive plutôt qu'à la corbeille, faute de certitude"
         return reason or "décision du modèle"
 
     def mounted(self, root):
@@ -1294,7 +1323,7 @@ class Review:
         items = [(p, t) for p, t in items if p not in unreadable]
         _, to_claude, local, missing, claude, failure, groups = ask(items, q, False, "review: ") if items else ([], [], {}, {}, {}, None, [])
         verdicts = judge({**{p: (d, LOCAL_AI) for p, d in local.items()}, **{p: (d, CLAUDE_AI) for p, d in claude.items()}}, groups, copies)
-        verdicts.update({p: ("garder", 0.0, None, "format que la relecture ne lit pas", None, None) for p in unreadable})
+        verdicts.update({p: ("garder", 0.0, None, "format que la relecture ne lit pas", None, None, None) for p in unreadable})
         to_claude = {p for p, _ in to_claude}
         unanswered = [p for p in asked if p not in verdicts]
         out_of_reach = failure is not None or any(missing.get(p, "").startswith("injoignable") for p in unanswered)
@@ -1312,12 +1341,12 @@ class Review:
                                    "tries": (prev.get("tries", 0) if prev.get("state") == "unanswered" else 0) + own}
             log(f"SANS RÉPONSE {os.path.basename(p)}  (review: {why}; try {self.files[keys[p]]['tries']})")
         trial, counts, start = CLEANUP != "on", {d: 0 for d in DECISIONS}, len(self.later)
-        for p, (decision, conf, kept, reason, ai, proposed) in verdicts.items():
+        for p, (decision, conf, kept, reason, ai, proposed, wanted) in verdicts.items():
             counts[decision] += 1
             prev = self.files.get(keys[p]) or {}
             e = self.files[keys[p]] = {"path": os.path.relpath(p, base), "decision": decision, "confidence": round(conf, 3), "reason": reason,
-                                       "twin": kept and os.path.relpath(kept, base), **(ai or {}), "time": self.now,
-                                       "state": "kept" if decision == "garder" else "pending"}
+                                       "twin": kept and os.path.relpath(kept, base), **(ai or {}), **({"proposal": wanted} if wanted else {}),
+                                       "time": self.now, "state": "kept" if decision == "garder" else "pending"}
             log(f"RELU    {os.path.basename(p)}  {decision} ({conf:.2f}{', ' + proposed if proposed else ''}) — {self.why(e)}")
             if decision == "garder":
                 continue
@@ -1364,10 +1393,14 @@ class Review:
             log(f"REVU    every theme folder read: {sweep['files']} document(s), {sweep.get('archiver', 0)} to archive, {sweep.get('supprimer', 0)} to trash")
         if sweep.get("files") and not self.state.get("first_sweep"):
             self.state["first_sweep"] = self.now
-            n, a, s = sweep["files"], sweep.get("archiver", 0), sweep.get("supprimer", 0)
-            notify(f"Relecture des dossiers terminée : {n} documents relus, {a} archivés, {s} mis à la corbeille" if CLEANUP == "on" else
-                   f"Relecture d'essai des dossiers terminée : {n} documents relus, {a} à archiver et {s} à supprimer proposés, rien n'a bougé. "
-                   "Le détail est dans le journal d'activité")
+            if CLEANUP == "on":
+                n, a, s = sweep["files"], sweep.get("archiver", 0), sweep.get("supprimer", 0)
+                notify(f"Relecture des dossiers terminée : {n} documents relus, {a} archivés, {s} mis à la corbeille")
+            else:   # the trial's proposals as they stand: a document read twice in the walk (asked again under new rules) counts once
+                decided = [e for e in self.files.values() if e.get("decision")]
+                a, s = (sum(e["decision"] == d and e.get("state") == "pending" for e in decided) for d in ("archiver", "supprimer"))
+                notify(f"Relecture d'essai des dossiers terminée : {len(decided)} documents relus, {a} à archiver et {s} à supprimer proposés, "
+                       "rien n'a bougé. Le détail est dans le journal d'activité")
 
 
 def stopped(signum, frame):

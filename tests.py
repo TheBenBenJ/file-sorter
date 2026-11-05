@@ -7,7 +7,8 @@ after pass: decisions, moves in the Drive, the Mac's results, a failing model, a
 (FILE_SORTER_SHADOW=1: Claude decides, the local model is compared), then the local model deciding for the files with text, its batches
 measured against its 16k-token slot, and the local model down; last, the review of the theme folders (keep, archive, trash): its trial,
 its guards (thresholds, copies, what it never reads), the trial lifted, the Mac carrying out archiver and supprimer (sort.py --apply,
-a fake trash), the models or a mount out of reach; and what the iPhone saves into the Drive without a folder (Chrome's
+a fake trash), the models or a mount out of reach, and its rules of 05/11/2026 evening (from 0.7 out of the folder, the trash from 0.9
+and the archive below, three hours of rest, a folder read again whole under new rules); and what the iPhone saves into the Drive without a folder (Chrome's
 « Enregistré depuis Chrome », the Drive's root), sorted like an inbox.
 The French file names and texts below are test data, as the owner's would be."""
 import contextlib, http.server, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unicodedata
@@ -775,6 +776,96 @@ check("review: a broken review.json never stops the pass: the inboxes are filed,
       and "review.json unreadable" in p.stdout and isinstance(rstate(), dict)
       and any(a["source"]["chemin"] == "00 À trier/Lettre.txt" for a in rplan()["actions"]))
 check("review: no file left behind by the atomic writes", not list(data2.glob("*.tmp")) and not list(data2.glob(".*.tmp")))
+
+# ---- the rules of 05/11/2026 evening (ticket 14): from 0.7 a document the model wants out leaves its folder, to the trash from 0.9 and
+# into the archive below; a document modified in the last three hours waits; a folder where a document stayed under the former rules is
+# read again whole ----
+N = T / "rules"
+icloud4, drive4, data4 = N / "icloud", N / "drive", N / "data"
+banque, ident4 = icloud4 / "10 Identité & Banque" / "Banque", icloud4 / "10 Identité & Banque" / "Identité"
+for d in (data4, icloud4 / "00 À trier", drive4 / "00 À trier", banque, ident4):
+    d.mkdir(parents=True, exist_ok=True)
+write(banque / "2013-11-27 Banque - RIB.txt", "Relevé d'identité bancaire du compte courant, 2013. ")
+write(banque / "2024-01-10 Banque - RIB.txt", "Relevé d'identité bancaire du compte courant, 2024. ")
+write(banque / "2019-01-07 Banque - Relevé.txt", "Relevé du compte courant, janvier 2019. ")
+for i, name in enumerate(("2018 CNI.png", "2018 CNI recto.jpeg", "2026 CNI.jpg", "2026 CNI scan.jpg")):
+    (ident4 / name).write_bytes(b"\xff\xd8\xff\xe0 carte " + bytes([i + 60]) * 60)   # no text: Claude reads them
+(ident4 / "2018 CNI (2).pdf").write_bytes(b"%PDF-1.4 carte " + bytes(range(64)))
+write(ident4 / "Notice.txt", "Notice d'utilisation d'un service, sans rapport avec le propriétaire. ")
+write(ident4 / "Brouillon.txt", "Un brouillon de lettre pour la préfecture. ")
+write(ident4 / "Attestation.txt", "Attestation de domicile, 2026. ")
+write(ident4 / "Récent.txt", "Un document enregistré il y a une heure. ")
+for f in N.rglob("*"):
+    if f.is_file():
+        os.utime(f, (old, old))
+for name, hours in (("Attestation.txt", 4), ("Récent.txt", 1)):
+    os.utime(ident4 / name, (time.time() - hours * 3600,) * 2)
+rel = lambda f: f"icloud|{f.relative_to(icloud4)}|{f.stat().st_size}"
+former = lambda f, decision, c, state: {"path": str(f.relative_to(icloud4)), "decision": decision, "confidence": c, "reason": "décision d'avant",
+                                        "twin": None, "engine": "local", "model": "qwen", "time": time.time(), "state": state}
+(data4 / "review.json").write_text(json.dumps({   # Banque read this afternoon under the former rules: an old RIB stayed, not sure enough
+    "files": {rel(banque / "2013-11-27 Banque - RIB.txt"): former(banque / "2013-11-27 Banque - RIB.txt", "garder", 0.75, "kept"),
+              rel(banque / "2024-01-10 Banque - RIB.txt"): former(banque / "2024-01-10 Banque - RIB.txt", "garder", 0.95, "kept"),
+              rel(banque / "2019-01-07 Banque - Relevé.txt"): former(banque / "2019-01-07 Banque - Relevé.txt", "archiver", 0.95, "pending")},
+    "cursor": [0, "10 Identité & Banque", "Banque"], "sweep": {"files": 3, "archiver": 1}}, ensure_ascii=False), encoding="utf-8")
+review_answers({"2013-11-27 Banque - RIB.txt": ("supprimer", "2024-01-10 Banque - RIB.txt", 0.75, "ancien RIB, remplacé par celui de 2024"),
+                "2024-01-10 Banque - RIB.txt": ("garder", None, 0.95, "RIB du compte en cours"),
+                "2019-01-07 Banque - Relevé.txt": ("archiver", None, 0.95, "relevé de 2019"),
+                "2018 CNI.png": ("archiver", None, 0.8, "carte de 2018, remplacée par celle de 2026"),
+                "2018 CNI recto.jpeg": ("supprimer", "2018 CNI.png", 0.75, "recto seul, moins bon que le PNG"),
+                "2018 CNI (2).pdf": ("archiver", None, 0.7, "autre photo de la carte de 2018"),
+                "2026 CNI.jpg": ("supprimer", "2026 CNI scan.jpg", 0.8, "même carte que le scan"),
+                "2026 CNI scan.jpg": ("supprimer", "2026 CNI.jpg", 0.8, "même carte que la photo"),
+                "Notice.txt": ("supprimer", None, 0.95, "notice sans intérêt"),
+                "Brouillon.txt": ("archiver", None, 0.65, "peut-être un ancien brouillon"),
+                "Attestation.txt": ("garder", None, 0.9, "attestation récente"),
+                "Récent.txt": ("supprimer", None, 0.99, "jamais demandé")})
+nenv = {"FILE_SORTER_ICLOUD": str(icloud4), "FILE_SORTER_DRIVE": str(drive4), "FILE_SORTER_DATA": str(data4), "FAKE_DRIVE": str(drive4)}
+nevents = lambda: [json.loads(x) for x in (data4 / "activity.jsonl").read_text(encoding="utf-8").splitlines()] if (data4 / "activity.jsonl").exists() else []
+nstate = lambda: json.loads((data4 / "review.json").read_text(encoding="utf-8"))
+Local.asked.clear()
+claude_asked()
+p = run("--decide", **nenv)
+ev = nevents()
+check("rules: under new rules, a folder where a document stayed for lack of certainty is read again whole at once, the walk starting over",
+      p.returncode == 0 and "review: new rules, 1 folder(s) read again whole (3 document(s))" in p.stdout and nstate()["rules"] == 2
+      and [sorted(x["names"]) for x in Local.asked] == [sorted(["2013-11-27 Banque - RIB.txt", "2024-01-10 Banque - RIB.txt", "2019-01-07 Banque - Relevé.txt"])]
+      or print(p.stdout[-3000:], p.stderr[-3000:]))
+check("rules: a lesser copy wanted in the trash at 0.75 goes to the archive, saying why; a proposal already in the journal is not repeated",
+      [(x["action"], x["object"]) for x in ev] == [("revu", "iCloud/10 Identité & Banque/Banque"), ("à archiver", "2013-11-27 Banque - RIB.txt")]
+      and ev[0]["detail"] == "3 document(s) relu(s) : 1 gardé(s), 2 à archiver, 0 à supprimer ; essai : rien n'a bougé"
+      and ev[1]["detail"] == "essai, rien n'a bougé : copie moins bonne de « 2024-01-10 Banque - RIB.txt » : ancien RIB, remplacé par celui de 2024 ; "
+                             "à l'archive plutôt qu'à la corbeille, faute de certitude" and ev[1]["to"] == "iCloud/90 Archives/10 Identité & Banque/Banque")
+Local.asked.clear()
+p = run("--decide", **nenv)
+new = nevents()[len(ev):]
+asked_names = {n for x in Local.asked for n in x["names"]} | {n for x in claude_asked() for n in x}
+check("rules: a document of more than three hours is read, one of the last hour only listed",
+      p.returncode == 0 and "Attestation.txt" in asked_names and "Récent.txt" not in asked_names
+      and any("- Récent.txt (1 Ko)" in x["body"]["messages"][0]["content"] for x in Local.asked))
+check("rules: from 0.7 out of the folder; the copy of a card going to the archive follows it there, the trash only from 0.9, below 0.7 it stays",
+      [x["detail"] for x in new if x["action"] == "revu"] == ["8 document(s) relu(s) : 3 gardé(s), 4 à archiver, 1 à supprimer ; essai : rien n'a bougé"]
+      and sorted(x["object"] for x in new if x["action"] == "à archiver") == ["2018 CNI (2).pdf", "2018 CNI recto.jpeg", "2018 CNI.png", "2026 CNI.jpg"]
+      and [x["object"] for x in new if x["action"] == "à supprimer"] == ["Notice.txt"]
+      and by(new, "à archiver", "2018 CNI recto.jpeg")["detail"].startswith("essai, rien n'a bougé : copie moins bonne de « 2018 CNI.png » : recto seul"))
+st = nstate()["files"]
+check("rules: of two copies naming each other one stays, also when the other goes to the archive; the model's own decision is kept",
+      st[rel(ident4 / "2026 CNI scan.jpg")]["decision"] == "garder" and st[rel(ident4 / "2026 CNI.jpg")]["decision"] == "archiver"
+      and st[rel(ident4 / "2018 CNI recto.jpeg")]["proposal"] == "supprimer" and st[rel(ident4 / "Brouillon.txt")]["decision"] == "garder")
+sent = next(x for x in Local.asked if "### Notice.txt" in x["body"]["messages"][0]["content"])["body"]["messages"][0]["content"]
+check("rules: the models' scale stays the same, without telling them what the script does with it",
+      "Si tu n'es pas sûr, mets moins de 0.8." in sent and "restera en place" not in sent)
+(T / "notified.txt").unlink(missing_ok=True)
+p = run("--decide", **nenv)
+notified = (T / "notified.txt").read_text(encoding="utf-8").splitlines() if (T / "notified.txt").exists() else []
+check("rules: the end of the trial's walk counts each document once, read again or not",
+      p.returncode == 0 and notified == ["Tri des fichiers Relecture d'essai des dossiers terminée : 11 documents relus, 6 à archiver et 1 à supprimer proposés, "
+                                         "rien n'a bougé. Le détail est dans le journal d'activité"])
+p = run("--decide", FILE_SORTER_CLEANUP="on", **nenv)
+kinds = {a["source"]["chemin"].rsplit("/", 1)[1]: a["type"] for a in json.loads((data4 / "plan.json").read_text(encoding="utf-8"))["actions"]}
+check("rules, on: what was not sure enough for the trash is archived by the Mac, the rest trashed as before", p.returncode == 0
+      and kinds == {"2013-11-27 Banque - RIB.txt": "archiver", "2019-01-07 Banque - Relevé.txt": "archiver", "2018 CNI.png": "archiver",
+                    "2018 CNI recto.jpeg": "archiver", "2018 CNI (2).pdf": "archiver", "2026 CNI.jpg": "archiver", "Notice.txt": "supprimer"})
 
 # ---- what the iPhone saves into the Drive without a folder: Chrome's « Enregistré depuis Chrome » and the Drive's root, sorted too ----
 C = T / "chrome"
