@@ -7,9 +7,10 @@ after pass: decisions, moves in the Drive, the Mac's results, a failing model, a
 (FILE_SORTER_SHADOW=1: Claude decides, the local model is compared), then the local model deciding for the files with text, its batches
 measured against its 16k-token slot, and the local model down; last, the review of the theme folders (keep, archive, trash): its trial,
 its guards (thresholds, copies, what it never reads), the trial lifted, the Mac carrying out archiver and supprimer (sort.py --apply,
-a fake trash), the models or a mount out of reach.
+a fake trash), the models or a mount out of reach; and what the iPhone saves into the Drive without a folder (Chrome's
+« Enregistré depuis Chrome », the Drive's root), sorted like an inbox.
 The French file names and texts below are test data, as the owner's would be."""
-import contextlib, http.server, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time
+import contextlib, http.server, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time, unicodedata
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -122,6 +123,8 @@ prompt = sys.argv[sys.argv.index("-p") + 1]
 answers = json.load(open(os.environ["FAKE_ANSWERS"], encoding="utf-8"))
 names = re.findall(r"^### (.+)$", prompt, re.M)
 open(os.environ["FAKE_CLAUDE_LOG"], "a", encoding="utf-8").write(json.dumps(names) + "\\n")   # the files Claude was asked about
+if os.environ.get("FAKE_CLAUDE_PROMPTS"):   # the whole question and the folders Claude may read
+    open(os.environ["FAKE_CLAUDE_PROMPTS"], "a", encoding="utf-8").write(json.dumps({{"prompt": prompt, "dirs": [sys.argv[i + 1] for i, a in enumerate(sys.argv) if a == "--add-dir"]}}) + "\\n")
 if os.environ.get("FAKE_CLAUDE_FAIL_ON") in names:   # a file the API refuses (an image it cannot process): the whole question fails
     sys.exit(print(json.dumps({{"type": "result", "is_error": True, "api_error": "invalid_request_error", "result": "Could not process image"}})) or 1)
 found = [{{"fichier": n, **answers[n]}} for n in names if n in answers]
@@ -772,6 +775,46 @@ check("review: a broken review.json never stops the pass: the inboxes are filed,
       and "review.json unreadable" in p.stdout and isinstance(rstate(), dict)
       and any(a["source"]["chemin"] == "00 À trier/Lettre.txt" for a in rplan()["actions"]))
 check("review: no file left behind by the atomic writes", not list(data2.glob("*.tmp")) and not list(data2.glob(".*.tmp")))
+
+# ---- what the iPhone saves into the Drive without a folder: Chrome's « Enregistré depuis Chrome » and the Drive's root, sorted too ----
+C = T / "chrome"
+icloud3, drive3, data3 = C / "icloud", C / "drive", C / "data"
+chrome = drive3 / unicodedata.normalize("NFD", "Enregistré depuis Chrome")   # as a mount may show it: « é » decomposed
+for d in (data3, icloud3 / "00 À trier", icloud3 / "30 Santé", icloud3 / "50 Travail", drive3 / "00 À trier", chrome):   # the tree is iCloud's
+    d.mkdir(parents=True, exist_ok=True)
+(drive3 / "Réservation-Rendez-vous-confirmé.pdf").write_bytes(b"%PDF-1.4 reservation " + bytes(range(60)))   # no text: Claude reads it
+write(drive3 / "notes.txt", "Des notes qu'un programme garde à la racine du Drive. ")   # not a document of the root: left alone
+(chrome / "Billet.pdf").write_bytes(b"%PDF-1.4 billet " + bytes(range(70)))
+(chrome / "Devis.docx").write_bytes(b"PK not really a docx " + bytes(range(80)))
+(chrome / "setup.zip").write_bytes(b"PK zip " + bytes(range(90)))   # not a document: left alone
+answer({"Réservation-Rendez-vous-confirmé.pdf": ("30 Santé", "2026-11-05 Clinique - Réservation rendez-vous.pdf", 0.9, "confirmation de rendez-vous"),
+        "Billet.pdf": ("30 Santé", "Billet.pdf", 0.4, "billet illisible"),
+        "Devis.docx": ("50 Travail", "2026-11-05 Artisan - Devis.docx", 0.9, "devis de travaux")})
+prompts = C / "prompts.jsonl"
+cenv = {"FILE_SORTER_ICLOUD": str(icloud3), "FILE_SORTER_DRIVE": str(drive3), "FILE_SORTER_DATA": str(data3), "FAKE_DRIVE": str(drive3),
+        "FAKE_CLAUDE_PROMPTS": str(prompts)}
+claude_asked()
+p = run("--decide", **cenv)
+cev = [json.loads(x) for x in (data3 / "activity.jsonl").read_text(encoding="utf-8").splitlines()]
+e = next((x for x in cev if x["action"] == "rangé" and x["object"] == "Réservation-Rendez-vous-confirmé.pdf"), None)
+check("Drive's root: a document saved there is filed like an inbox's, into iCloud by the Mac", p.returncode == 0 and e
+      and e["from"] == "Google Drive" and e["to"] == "iCloud/30 Santé/2026-11-05 Clinique - Réservation rendez-vous.pdf" and "le Mac le range" in e["detail"]
+      or print(p.stdout[-2000:], p.stderr[-2000:]))
+e = next((x for x in cev if x["action"] == "rangé" and x["object"] == "Devis.docx"), None)
+check("Chrome's folder: an editable document filed by the server in the Drive", e and e["from"] == "Google Drive/Enregistré depuis Chrome"
+      and e["to"] == "Google Drive/50 Travail/2026-11-05 Artisan - Devis.docx" and (drive3 / "50 Travail" / "2026-11-05 Artisan - Devis.docx").exists())
+e = next((x for x in cev if x["action"] == "à trier" and x["object"] == "Billet.pdf"), None)
+check("Chrome's folder: a doubtful download joins the Drive's 00 À trier", e and e["to"] == "Google Drive/00 À trier/Billet.pdf"
+      and (drive3 / "00 À trier" / "Billet.pdf").exists() and not (chrome / "Billet.pdf").exists())
+asked = {n for x in claude_asked() for n in x}
+question = [json.loads(x) for x in prompts.read_text(encoding="utf-8").splitlines()]
+check("Drive's root and Chrome's folder: what is not a document stays, never asked about", (drive3 / "notes.txt").exists() and (chrome / "setup.zip").exists()
+      and not asked & {"notes.txt", "setup.zip"} and "Réservation-Rendez-vous-confirmé.pdf" in asked)
+check("Drive's root: Claude reads a copy, never the whole Drive", question and str(drive3) not in question[0]["dirs"]
+      and str(chrome) in question[0]["dirs"] and f"{drive3}/Réservation-Rendez-vous-confirmé.pdf" not in question[0]["prompt"])
+p = run("--apply", **cenv)
+check("Mac: takes a document of the Drive's root into iCloud", p.returncode == 0 and (icloud3 / "30 Santé" / "2026-11-05 Clinique - Réservation rendez-vous.pdf").exists()
+      and not (drive3 / "Réservation-Rendez-vous-confirmé.pdf").exists())
 shutil.rmtree(T)
 LOCAL.shutdown()
 

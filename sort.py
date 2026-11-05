@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Sorts the inboxes into the numbered folder tree, automatically: the Drive's 00 À trier (where the iPhone and the Mac's
-Downloads put documents), the Drive's 00 Factures entrantes (invoices from Gmail), iCloud's 00 À trier, and last the Drive's
-00 Pièces jointes (the attachments of the mails, exported by the mail sorter; a doubtful one stays there).
+Downloads put documents), the Drive's 00 Factures entrantes (invoices from Gmail), the documents the iPhone saves into the Drive
+without a folder (Chrome's « Enregistré depuis Chrome », the Drive's root), iCloud's 00 À trier, and last the Drive's 00 Pièces
+jointes (the attachments of the mails, exported by the mail sorter; a doubtful one stays there).
 A model proposes a destination and a name for each file: the home server's local model for the files whose text can be read (an
 OpenAI API, no tool, a strict JSON schema), Claude (CLI, Read tool only) for the others (scans, images: the local model reads no image).
 This script validates them and files the file: editable documents in the Drive, finished ones in iCloud. Nothing is ever overwritten;
@@ -54,12 +55,30 @@ GMAIL_INBOX = os.path.join(DRIVE, "00 Factures entrantes")  # filled by gmail-in
 # the attachments of the mails, received and sent, exported by the mail sorter (attachments.py): read last, so that Benjamin's own
 # inboxes go first; a doubtful file stays there, remembered in kept.json, rather than flooding 00 À trier with a mailbox's backlog
 ATTACH_INBOX = os.environ.get("FILE_SORTER_ATTACHMENTS_INBOX") or os.path.join(DRIVE, "00 Pièces jointes")
-DRIVE_INBOXES = (DRIVE_INBOX, GMAIL_INBOX, ATTACH_INBOX)
+# What the iPhone saves into the Drive without choosing a folder (05/11/2026, ticket 14): Chrome's « Enregistrer dans Drive » puts it in
+# a folder of its own at the Drive's root (its name follows Chrome's language), the Files app at the root itself. Both are sorted like an
+# inbox, documents only (the rest stays where it is); a doubtful one goes to the Drive's 00 À trier, so that the root stays tidy.
+CHROME_NAMES = ("Enregistré depuis Chrome", "Saved from Chrome")
+
+
+def chrome_inboxes():
+    """Chrome's folders as the Drive shows them (their names compared in NFC: the mount may show « é » decomposed), else the usual names."""
+    try:
+        found = [os.path.join(DRIVE, d) for d in sorted(os.listdir(DRIVE))
+                 if unicodedata.normalize("NFC", d) in CHROME_NAMES and os.path.isdir(os.path.join(DRIVE, d))]
+    except OSError:
+        found = []
+    return tuple(found) or tuple(os.path.join(DRIVE, d) for d in CHROME_NAMES)
+
+
+CHROME_INBOXES = chrome_inboxes()
+DRIVE_INBOXES = (DRIVE_INBOX, GMAIL_INBOX, ATTACH_INBOX) + CHROME_INBOXES + (DRIVE,)   # DRIVE: the loose documents of its root
 DRIVE_RCLONE = os.environ.get("FILE_SORTER_DRIVE_RCLONE")   # server: rclone remote allowed to write the Drive ("gsort:"); unset, only the Mac moves
-EXTERNAL = (DOWNLOADS, GMAIL_INBOX)   # sources Benjamin does not look at: a doubtful file goes to the Drive's 00 À trier
+EXTERNAL = (DOWNLOADS, GMAIL_INBOX) + CHROME_INBOXES + (DRIVE,)   # sources the owner does not look at: a doubtful file goes to the Drive's 00 À trier
 OFFICE = (".docx", ".doc", ".odt", ".xlsx", ".xls", ".ods", ".pptx", ".ppt", ".odp")   # editable: filed in the Drive (same tree), finished documents in iCloud
 DOCUMENTS = OFFICE + (".pdf", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff", ".rtf",
                       ".pages", ".numbers", ".key", ".txt", ".csv", ".md")   # what Downloads pours into the Drive; the rest stays there
+ROOT_DOCUMENTS = OFFICE + (".pdf", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".rtf", ".pages", ".numbers", ".key")   # at the Drive's root: never a text or data file a program may keep there
 PREVIEWS = tempfile.mkdtemp(prefix="file-sorter-")
 atexit.register(shutil.rmtree, PREVIEWS, ignore_errors=True)   # one folder per pass: removed when the pass ends
 PARTIAL_EXT = (".crdownload", ".download", ".part", ".partial", ".tmp", ".opdownload")
@@ -249,6 +268,8 @@ def pending(sources, skip=lambda p: False):
                     log(f"TROP GROS {f}  ({st.st_size // 2**20} MB) left in Downloads")
                     notify(f"{f} ({st.st_size // 2**20} Mo) trop gros, laissé dans Téléchargements")
                 continue
+            if (src == DRIVE and not f.lower().endswith(ROOT_DOCUMENTS)) or (src in CHROME_INBOXES and not f.lower().endswith(DOCUMENTS)):
+                continue   # not a document: left where it is
             files.append(p)
     return files[:MAX_FILES]
 
@@ -355,7 +376,7 @@ def text_block(p, txt):
 def filing(tree):
     """The question of the inboxes: a destination and a name for each file."""
     return Question(lambda blocks, local=False: prompt(tree, blocks, local), SCHEMA, FILING_ITEM,
-                    (INBOX, DRIVE_INBOX, DOWNLOADS, GMAIL_INBOX, ATTACH_INBOX, PREVIEWS))
+                    (INBOX, DRIVE_INBOX, DOWNLOADS, GMAIL_INBOX, ATTACH_INBOX, PREVIEWS) + CHROME_INBOXES)   # the Drive's root: through copies
 
 
 def ask_claude(items, q):
@@ -368,8 +389,11 @@ def ask_claude(items, q):
             jpg = os.path.join(PREVIEWS, hashlib.sha1(p.encode()).hexdigest()[:8] + "-" + re.sub(r"\W", "_", name) + ".jpg")   # one per file
             jpeg_preview(p, jpg)
             blocks.append(f"### {name}\nImage : lis l'aperçu JPEG avec l'outil Read à ce chemin exact : {jpg}")
-        else:
-            blocks.append(f"### {name}\nPas de texte extractible : lis-le avec l'outil Read à ce chemin exact : {p}{q.read_hint}")
+        else:   # a file of a folder Claude may not read (the Drive's root: it would open the whole Drive) is read through a copy
+            path = p if os.path.dirname(p) in q.dirs else os.path.join(PREVIEWS, hashlib.sha1(p.encode()).hexdigest()[:8] + "-" + name)
+            if path != p:
+                shutil.copy(p, path)
+            blocks.append(f"### {name}\nPas de texte extractible : lis-le avec l'outil Read à ce chemin exact : {path}{q.read_hint}")
     dirs = [x for d in q.dirs if os.path.isdir(d) for x in ("--add-dir", d)]
     cmd = [CLAUDE, "-p", q.prompt(blocks), "--model", MODEL, "--output-format", "json",
            "--json-schema", json.dumps(q.schema), "--tools", "Read", "--allowedTools", "Read",
@@ -680,7 +704,7 @@ def main():
         moved, kept = [], []
         done = set()
         while True:
-            files = pending((DOWNLOADS, GMAIL_INBOX, DRIVE_INBOX, INBOX, ATTACH_INBOX), skip=lambda p: p in done)
+            files = pending((DOWNLOADS, GMAIL_INBOX, DRIVE_INBOX) + CHROME_INBOXES + (DRIVE, INBOX, ATTACH_INBOX), skip=lambda p: p in done)
             if not files:
                 break
             done.update(files)
@@ -745,8 +769,8 @@ def batch(files, moved, kept):
 # (actions, faites, appliques, racine, chemin, taille, cible, cree_le...), action types and statuses are a contract.
 
 def relative(p):
-    """(root, path relative to it in NFC) of a file in iCloud or the Drive."""
-    return ("drive", nfc(os.path.relpath(p, DRIVE))) if p.startswith(DRIVE + os.sep) else ("icloud", nfc(os.path.relpath(p, ICLOUD)))
+    """(root, path relative to it in NFC) of a file in iCloud or the Drive ("." for a root itself)."""
+    return ("drive", nfc(os.path.relpath(p, DRIVE))) if p == DRIVE or p.startswith(DRIVE + os.sep) else ("icloud", nfc(os.path.relpath(p, ICLOUD)))
 
 
 def make_action(kind, src, **extra):
@@ -797,8 +821,8 @@ def drive_move(src, folder, name):
 # ---- the activity journal and the step report (activity.py): what the server decided and did, and what the Mac did ----
 
 def place(root, rel=""):
-    """A place as the owner reads it: "Google Drive/…" or "iCloud/…"."""
-    return f"{'Google Drive' if root == 'drive' else 'iCloud'}/{rel}".rstrip("/")
+    """A place as the owner reads it: "Google Drive/…" or "iCloud/…" ("Google Drive" alone for its root)."""
+    return f"{'Google Drive' if root == 'drive' else 'iCloud'}/{'' if rel == '.' else rel}".rstrip("/")
 
 
 def where(p):
@@ -1354,9 +1378,10 @@ def stopped(signum, frame):
 
 
 def decide():
-    """Server: decides for the inboxes (the Drive's 00 À trier and 00 Factures entrantes, iCloud's 00 À trier, the Drive's 00 Pièces
-    jointes). Into iCloud, and out of iCloud, only the Mac moves: plan.json keeps the actions it has not returned yet. Inside the Drive,
-    with FILE_SORTER_DRIVE_RCLONE, the server files itself: editable documents into the tree, doubtful invoices into 00 À trier,
+    """Server: decides for the inboxes (the Drive's 00 À trier and 00 Factures entrantes, Chrome's folder and the Drive's root, iCloud's
+    00 À trier, the Drive's 00 Pièces jointes). Into iCloud, and out of iCloud, only the Mac moves: plan.json keeps the actions it has not
+    returned yet. Inside the Drive, with FILE_SORTER_DRIVE_RCLONE, the server files itself: editable documents into the tree, doubtful
+    invoices and downloads into 00 À trier,
     duplicates to the Drive's trash. A source already planned or just handled is not asked about again.
     Then the review of the theme folders (FILE_SORTER_CLEANUP trial or on, class Review): what the Mac did with its actions, the decisions
     waiting once the trial is lifted, and, when the inboxes left the models free, the next documents of a folder.
@@ -1415,7 +1440,7 @@ def decide():
         elif not actions:
             REPORT.set("icloud", "skipped")   # while the Mac has actions to apply, its step stays without a state
         planned = {f"{a['source']['racine']}|{a['source']['chemin']}" for a in actions} | set(done)
-        files = pending((GMAIL_INBOX, DRIVE_INBOX, INBOX, ATTACH_INBOX), skip=lambda p: "|".join(relative(p)) in planned)
+        files = pending((GMAIL_INBOX, DRIVE_INBOX) + CHROME_INBOXES + (DRIVE, INBOX, ATTACH_INBOX), skip=lambda p: "|".join(relative(p)) in planned)
         server_side = lambda p: bool(DRIVE_RCLONE) and os.path.dirname(p) in DRIVE_INBOXES
 
         def by_server(p, what, act):   # a move in the Drive done here; a failure is kept for the end of the pass, the file stays
@@ -1462,7 +1487,7 @@ def decide():
                 if dest is None:
                     signature = sig(src)   # before a move: the mount may stop showing the file at once
                     why = kept_why(conf, d)
-                    if os.path.dirname(src) == GMAIL_INBOX:   # a doubtful invoice joins the inbox Benjamin looks at; an attachment stays
+                    if os.path.dirname(src) in (GMAIL_INBOX,) + CHROME_INBOXES + (DRIVE,):   # a doubtful invoice or download joins the inbox the owner looks at; an attachment stays
                         if server_side(src):
                             moved = by_server(src, "vers 00 À trier", lambda: drive_move(src, os.path.relpath(DRIVE_INBOX, DRIVE), name))
                             if not moved:
@@ -1598,7 +1623,7 @@ def apply_action(a, moved, kept):
             raise ValueError("source hors des dossiers par thèmes")
         if any(b in "/" + "/".join(top[:-1]) for b in tuple(SETTINGS.get("paquets") or ()) + (PHOTOS,)):
             raise ValueError("source dans un dossier que la relecture ne touche pas")
-    elif nfc(os.path.dirname(src)) not in (nfc(INBOX), nfc(GMAIL_INBOX), nfc(DRIVE_INBOX), nfc(ATTACH_INBOX)):
+    elif nfc(os.path.dirname(src)) not in tuple(nfc(x) for x in (INBOX, GMAIL_INBOX, DRIVE_INBOX, ATTACH_INBOX) + CHROME_INBOXES + (DRIVE,)):
         raise ValueError("source hors des boîtes d'arrivée")
     if not os.path.exists(src):
         return "absent"
