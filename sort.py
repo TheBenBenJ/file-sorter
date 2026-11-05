@@ -12,7 +12,10 @@ Ways to run it:
   sort.py [--dry-run]  everything on the Mac: decide and move (the original mode)
   sort.py --decide     on a server where iCloud and the Drive are mounted read-only: decides and writes plan.json (ranger,
                        doublon) for the Mac; with FILE_SORTER_DRIVE_RCLONE (an rclone remote that may write the Drive), it also
-                       files the Drive's own documents itself: moves and renames inside the Drive, duplicates to the Drive's trash
+                       files the Drive's own documents itself: moves and renames inside the Drive, duplicates to the Drive's trash.
+                       When the inboxes leave the models free, it also reviews the theme folders, a few documents per pass: each one
+                       is kept, archived (« 90 Archives », same path) or trashed (plan actions archiver and supprimer for iCloud);
+                       FILE_SORTER_CLEANUP=trial (the default) only logs these decisions, on applies them, off stops the review
   sort.py --apply      on the Mac: applies plan.json received from the server, pours the documents of ~/Downloads into the
                        Drive's 00 À trier, writes results.json
   sort.py --deposit <icloud|drive> <path> <file>   on the server: hands the Mac a document to write there (the VAT check report, for example)
@@ -24,7 +27,7 @@ FILE_SORTER_INBOX, FILE_SORTER_DRIVE_INBOX and FILE_SORTER_ATTACHMENTS_INBOX rep
 FILE_SORTER_DOWNLOADS_MAX_MB the largest download poured into the Drive (50), FILE_SORTER_MIN_AGE the seconds a file must stay unchanged
 before it is handled (60; tests.py sets 0).
 """
-import atexit, fcntl, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, time, unicodedata, urllib.error, urllib.request
+import atexit, fcntl, hashlib, json, os, re, shutil, signal, stat, subprocess, sys, tempfile, time, unicodedata, urllib.error, urllib.request
 from datetime import datetime
 HOME = os.path.expanduser("~")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -83,6 +86,28 @@ MIN_AGE = int(os.environ.get("FILE_SORTER_MIN_AGE", "60"))   # seconds without m
 MAX_FILES = 15        # per pass
 THRESHOLD = 0.7       # minimum confidence to move a file
 DRY = "--dry-run" in sys.argv
+# The review of the theme folders (sort.py --decide only): the documents already filed are read again, a few per pass, and each one is kept,
+# archived (into the archive folder, at the same path) or sent to the trash, so that the theme folders hold only what is still of use.
+# FILE_SORTER_CLEANUP: "trial" (the default) decides and logs proposals, nothing moves; "on" archives and trashes; "off": no review.
+CLEANUP = {"on": "on", "off": "off"}.get(os.environ.get("FILE_SORTER_CLEANUP", ""), "trial")   # any other value: the trial, where nothing moves
+ARCHIVES = SETTINGS.get("archives") or "90 Archives"   # the archive folder, in iCloud and in the Drive; an existing « NN Archives » wins
+ARCHIVE_NAME = re.compile(r"\d\d Archives?", re.I)
+THEME = re.compile(r"\d\d ")   # the theme folders are the numbered ones of the root (« 10 Identité & Banque »…), the 00 inboxes aside
+REVIEW = os.path.join(DATA, "review.json")
+REVIEW_KINDS = ("archiver", "supprimer")   # the plan's actions of the review (the Mac moves into iCloud's archive or to its Trash)
+DECISIONS = ("garder", "archiver", "supprimer")
+REVIEW_THRESHOLD = {"archiver": 0.8, "supprimer": 0.9}   # below, the document stays where it is
+REVIEW_EXT = OFFICE + (".pdf", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff", ".rtf", ".pages", ".numbers", ".key", ".txt")
+REVIEW_VISUAL = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif")   # without text, Claude reads these (HEIC through a JPEG)
+REVIEW_FILES = 10           # documents asked about per pass, one folder at a time; a folder of 10 or fewer is always read whole
+REVIEW_APPLY = 40           # decisions applied per pass at most (once the trial is lifted, the trial's own first)
+REVIEW_CHARS = 1200         # of each document's text: enough to tell what it is
+REVIEW_LISTING = 150        # names of the folder given as context, at most
+REVIEW_MIN_AGE = 2 * 86400  # a document modified in the last two days is left for later
+REVIEW_AGAIN = 180 * 86400  # a document is read again after six months: what was current may not be any more
+REVIEW_RETRIES = (3600, 86400, 30 * 86400)   # a document left without an answer is asked again an hour later, then a day, then a month
+REVIEW_REST = 3600          # once every folder is read, the next walk an hour later at the earliest
+REVIEW_PAUSE = 3600         # a model that failed: the review waits an hour, the inboxes do not
 # The Dashboard's activity journal and step report (activity.py): written by the server's pass only, the single writer
 STEPS = ("inboxes", "decide", "drive", "plan", "icloud")   # the steps of file-sorting's workflow in the home server's registry
 if ROLE == "decide":
@@ -130,12 +155,29 @@ def write_json(path, value):
     os.replace(tmp, path)
 
 
+def is_archive(top):
+    """A root's first-level folder that is the archive (« 90 Archives »), where the review moves what is no longer current."""
+    return bool(ARCHIVE_NAME.fullmatch(nfc(top))) or nfc(top) == nfc(ARCHIVES)
+
+
+def archive_of(base):
+    """The archive folder of a root (iCloud or the Drive): an existing « NN Archives » of its first level, else the settings' name."""
+    try:
+        found = sorted(d for d in os.listdir(base) if ARCHIVE_NAME.fullmatch(nfc(d)) and os.path.isdir(os.path.join(base, d)))
+    except OSError:
+        found = []
+    return found[0] if found else ARCHIVES
+
+
 def folders():
+    """The destinations offered to the model: iCloud's folders, four levels at most, neither the 00 inboxes nor the archive (the review
+    moves there what is no longer current)."""
     out = []
     for r, ds, _ in os.walk(ICLOUD):
         ds[:] = sorted(d for d in ds if not d.startswith("."))
         rel = nfc(os.path.relpath(r, ICLOUD))
-        if rel == "." or rel.startswith("00 "):
+        if rel == ".":
+            ds[:] = [d for d in ds if not nfc(d).startswith("00 ") and not is_archive(d)]
             continue
         if rel.count(os.sep) < 4:
             out.append(rel)
@@ -252,6 +294,18 @@ SCHEMA = {
     }}},
     "required": ["fichiers"],
 }
+# One answer of the local model, whose strict schema (local_schema) adds "fichier", one of the names asked: strings of bounded length
+FILING_ITEM = {"destination": {"type": "string", "maxLength": 200}, "nouveau_nom": {"type": ["string", "null"], "maxLength": 150},
+               "confiance": {"type": "number"}, "raison": {"type": "string", "maxLength": 300}}
+
+
+class Question:
+    """What the models are asked about a batch of files: prompt(blocks, local) builds the question around the files' blocks, schema is
+    Claude's answer format and item the properties of one answer in the local model's strict schema, dirs the folders Claude may read,
+    read_hint what Claude is told about a document it reads itself (a PDF without text)."""
+
+    def __init__(self, prompt, schema, item, dirs, read_hint=""):
+        self.prompt, self.schema, self.item, self.dirs, self.read_hint = prompt, schema, item, dirs, read_hint
 
 
 CONVENTION = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "convention.md")).read()
@@ -298,21 +352,27 @@ def text_block(p, txt):
     return f"### {os.path.basename(p)}\nExtrait du texte :\n{txt}"
 
 
-def ask_claude(items, tree):
+def filing(tree):
+    """The question of the inboxes: a destination and a name for each file."""
+    return Question(lambda blocks, local=False: prompt(tree, blocks, local), SCHEMA, FILING_ITEM,
+                    (INBOX, DRIVE_INBOX, DOWNLOADS, GMAIL_INBOX, ATTACH_INBOX, PREVIEWS))
+
+
+def ask_claude(items, q):
     blocks = []
     for p, txt in items:
         name = os.path.basename(p)
         if txt:
             blocks.append(text_block(p, txt))
         elif os.path.splitext(p)[1].lower() in (".heic", ".heif", ".tiff"):
-            jpg = os.path.join(PREVIEWS, re.sub(r"\W", "_", name) + ".jpg")
+            jpg = os.path.join(PREVIEWS, hashlib.sha1(p.encode()).hexdigest()[:8] + "-" + re.sub(r"\W", "_", name) + ".jpg")   # one per file
             jpeg_preview(p, jpg)
             blocks.append(f"### {name}\nImage : lis l'aperçu JPEG avec l'outil Read à ce chemin exact : {jpg}")
         else:
-            blocks.append(f"### {name}\nPas de texte extractible : lis-le avec l'outil Read à ce chemin exact : {p}")
-    dirs = [x for d in (INBOX, DRIVE_INBOX, DOWNLOADS, GMAIL_INBOX, ATTACH_INBOX, PREVIEWS) if os.path.isdir(d) for x in ("--add-dir", d)]
-    cmd = [CLAUDE, "-p", prompt(tree, blocks), "--model", MODEL, "--output-format", "json",
-           "--json-schema", json.dumps(SCHEMA), "--tools", "Read", "--allowedTools", "Read",
+            blocks.append(f"### {name}\nPas de texte extractible : lis-le avec l'outil Read à ce chemin exact : {p}{q.read_hint}")
+    dirs = [x for d in q.dirs if os.path.isdir(d) for x in ("--add-dir", d)]
+    cmd = [CLAUDE, "-p", q.prompt(blocks), "--model", MODEL, "--output-format", "json",
+           "--json-schema", json.dumps(q.schema), "--tools", "Read", "--allowedTools", "Read",
            *dirs, "--strict-mcp-config", "--setting-sources", "project", "--no-session-persistence"]
     env = dict(os.environ, PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, cwd=tempfile.gettempdir(), env=env)
@@ -331,35 +391,36 @@ def local_call(path, body, timeout=LOCAL_TIMEOUT):
         return json.load(r)
 
 
-def local_schema(names):
-    """SCHEMA for the local model, strict: exactly one answer per file, "fichier" one of the names asked, strings of bounded length."""
-    item = {"fichier": {"type": "string", "enum": names}, "destination": {"type": "string", "maxLength": 200},
-            "nouveau_nom": {"type": ["string", "null"], "maxLength": 150}, "confiance": {"type": "number"}, "raison": {"type": "string", "maxLength": 300}}
+def local_schema(names, item=FILING_ITEM):
+    """The answer format for the local model, strict: exactly one answer per file, "fichier" one of the names asked, then the question's own
+    properties (item), strings of bounded length."""
+    item = {"fichier": {"type": "string", "enum": names}, **item}
     return {"type": "object", "properties": {"fichiers": {"type": "array", "minItems": len(names), "maxItems": len(names), "items": {
         "type": "object", "properties": item, "required": list(item)}}}, "required": ["fichiers"]}
 
 
-def ask_local(items, tree):
-    """The local model's answers for files with text: ({source: answer}, {source: why it has none, in French}). Batches of LOCAL_FILES files
-    at most, measured with the model's own tokenizer (/tokenize) so that the prompt and its answer fit in a slot; a batch it refuses as too
-    long is split. An unreachable model stops the asking (the next batches would wait as long); an unreadable answer only loses its batch."""
+def ask_local(items, q, tag=None):
+    """The local model's answers for files with text: ({source: answer}, {source: why it has none, in French}, [the files of each question
+    answered]). Batches of LOCAL_FILES files at most, measured with the model's own tokenizer (/tokenize) so that the prompt and its answer
+    fit in a slot; a batch it refuses as too long is split. An unreachable model stops the asking (the next batches would wait as long);
+    an unreadable answer only loses its batch."""
     if LOCAL_URL in ("", "off"):
-        return {}, {p: "FILE_SORTER_LOCAL_URL=off" for p, _ in items}
-    tag = "shadow: " if SHADOW else ""
-    texts, answers, missing = dict(items), {}, {}
+        return {}, {p: "FILE_SORTER_LOCAL_URL=off" for p, _ in items}, []
+    tag = ("shadow: " if SHADOW else "") if tag is None else tag
+    texts, answers, missing, groups = dict(items), {}, {}, []
     try:
-        fixed = len(local_call("/tokenize", {"content": prompt(tree, [], local=True)}, 60)["tokens"])
+        fixed = len(local_call("/tokenize", {"content": q.prompt([], True)}, 60)["tokens"])
         size = {p: len(local_call("/tokenize", {"content": text_block(p, t) + "\n"}, 60)["tokens"]) for p, t in items}
     except Exception as e:
         log(f"{tag}local model unreachable: {type(e).__name__} {str(e)[:150]}")
-        return {}, {p: f"injoignable, {type(e).__name__}" for p, _ in items}
+        return {}, {p: f"injoignable, {type(e).__name__}" for p, _ in items}, []
     room = lambda n: LOCAL_CONTEXT - LOCAL_MARGIN - LOCAL_ANSWER * n - 100   # tokens the prompt may take for n files
     queue, batch = [], []
     for p, _ in items:
         if fixed + size[p] > room(1):
             missing[p] = f"trop long pour un créneau, {fixed + size[p]} tokens"
             continue
-        if batch and (len(batch) == LOCAL_FILES or fixed + sum(size[q] for q in batch) + size[p] > room(len(batch) + 1)):
+        if batch and (len(batch) == LOCAL_FILES or fixed + sum(size[x] for x in batch) + size[p] > room(len(batch) + 1)):
             queue.append(batch)
             batch = []
         batch.append(p)
@@ -368,8 +429,8 @@ def ask_local(items, tree):
         batch = queue.pop(0)
         names = [os.path.basename(p) for p in batch]
         body = {"model": "local", "temperature": 0, "max_tokens": LOCAL_ANSWER * len(batch) + 100, "chat_template_kwargs": {"enable_thinking": False},
-                "messages": [{"role": "user", "content": prompt(tree, [text_block(p, texts[p]) for p in batch], local=True)}],
-                "response_format": {"type": "json_schema", "json_schema": {"name": "fichiers", "schema": local_schema(names), "strict": True}}}
+                "messages": [{"role": "user", "content": q.prompt([text_block(p, texts[p]) for p in batch], True)}],
+                "response_format": {"type": "json_schema", "json_schema": {"name": "fichiers", "schema": local_schema(names, q.item), "strict": True}}}
         try:
             r = local_call("/v1/chat/completions", body)
             choice = r["choices"][0]
@@ -383,11 +444,11 @@ def ask_local(items, tree):
             if e.code == 400:
                 missing.update({p: "refusé par le modèle local, sans doute trop long" for p in batch})
                 continue
-            missing.update({p: f"injoignable, HTTP {e.code}" for p in batch + [q for b in queue for q in b]})
+            missing.update({p: f"injoignable, HTTP {e.code}" for p in batch + [x for b in queue for x in b]})
             log(f"{tag}local model unavailable: HTTP {e.code}, {len(batch) + sum(map(len, queue))} file(s) without its answer")
             break
         except OSError as e:   # unreachable, refused or too slow: the next batches would fare no better
-            missing.update({p: f"injoignable, {type(e).__name__}" for p in batch + [q for b in queue for q in b]})
+            missing.update({p: f"injoignable, {type(e).__name__}" for p in batch + [x for b in queue for x in b]})
             log(f"{tag}local model unavailable: {type(e).__name__} {str(e)[:150]}, {len(batch) + sum(map(len, queue))} file(s) without its answer")
             break
         except Exception as e:   # an answer that cannot be read: this batch only
@@ -395,9 +456,10 @@ def ask_local(items, tree):
             log(f"{tag}local model's answer unreadable for {len(batch)} file(s): {type(e).__name__} {str(e)[:150]}")
             continue
         answers.update(found)
+        groups.append(batch)
         missing.update({p: "absent de sa réponse" for p in batch if p not in found})
         log(f"{tag}local model {LOCAL_MODEL}: {len(found)} of {len(batch)} file(s) answered, {(r.get('usage') or {}).get('prompt_tokens')} prompt tokens")
-    return answers, missing
+    return answers, missing, groups
 
 
 def claude_error(r):
@@ -495,13 +557,25 @@ def dedupe(files):
     return keep, duplicates
 
 
+def simple(name):
+    """A name compared loosely, as a model may write it back (case, accents, punctuation)."""
+    return re.sub(r"[^0-9a-z]", "", unicodedata.normalize("NFKD", str(name)).lower())
+
+
+def named(name, files):
+    """The file of a question a model names: its exact name (NFC; the first one when two inboxes hold the same name, the other waits for the
+    next pass), else its simplified name (a model may drop an accent) when no other file of the question shares it: « Facture (2).pdf »
+    and « Facture 2.pdf » are never taken for each other. None if none or ambiguous."""
+    exact = [p for p in files if nfc(os.path.basename(p)) == nfc(str(name))]
+    loose = [p for p in files if simple(os.path.basename(p)) == simple(name)]
+    return exact[0] if exact else loose[0] if len(loose) == 1 else None
+
+
 def match(decisions, files):
-    """Each answer to its file, by name (simplified: a model may drop an accent); the first answer for a file wins. -> {source: answer}"""
-    simple = lambda x: re.sub(r"[^0-9a-z]", "", unicodedata.normalize("NFKD", x).lower())
-    by_name = {simple(os.path.basename(p)): p for p in files}
+    """Each answer to its file, by name (named); the first answer for a file wins. -> {source: answer}"""
     found = {}
     for d in decisions if isinstance(decisions, list) else []:
-        src = by_name.get(simple(str(d.get("fichier", "")))) if isinstance(d, dict) else None
+        src = named(d.get("fichier", ""), files) if isinstance(d, dict) else None
         if src and src not in found and os.path.exists(src):
             found[src] = d
     return found
@@ -554,6 +628,23 @@ def compare(texts, claude, local, missing, tree):
         log(f"shadow: {same + differ + none} file(s) with text compared: {same} the same, {differ} different, {none} without a local answer")
 
 
+def ask(items, q, shadow, tag=None):
+    """Asks the models about [(file, its text or None)]: the files with text go to the local model, the others to Claude; with shadow,
+    Claude gets them all and the local model's answers are only for comparing. -> (the items with text, the items asked to Claude, the local
+    model's answers, why it has none for the others, Claude's answers, Claude's failure or None, [the files of each question answered])."""
+    texts = [(p, t) for p, t in items if t]
+    to_claude = items if shadow else [(p, t) for p, t in items if not t]
+    local, missing, groups = ask_local(texts, q, tag) if texts else ({}, {}, [])
+    claude, failure = {}, None
+    if to_claude:
+        try:
+            claude = match(ask_claude(to_claude, q), [p for p, _ in to_claude])
+            groups.append([p for p, _ in to_claude])
+        except Exception as e:
+            failure = e
+    return texts, to_claude, local, missing, claude, failure, groups
+
+
 def choose(files):
     """The decision for each file, validated: ([(source, destination or None if the file stays, name, confidence, answer, who decided)],
     Claude's failure or None, the number of files the local model left without an answer). Files with text go to the local model, the
@@ -561,16 +652,7 @@ def choose(files):
     stays where it is, « sans réponse », and is asked about again at the next pass. When Claude fails, the files it was asked about wait
     too, and the caller fails the pass once the others are done."""
     tree = folders()
-    items = [(p, extract(p)) for p in files]
-    texts = [(p, t) for p, t in items if t]
-    to_claude = items if SHADOW else [(p, t) for p, t in items if not t]
-    local, missing = ask_local(texts, tree) if texts else ({}, {})
-    claude, failure = {}, None
-    if to_claude:
-        try:
-            claude = match(ask_claude(to_claude, tree), [p for p, _ in to_claude])
-        except Exception as e:
-            failure = e
+    texts, to_claude, local, missing, claude, failure, _ = ask([(p, extract(p)) for p in files], filing(tree), SHADOW)
     if SHADOW:
         if not failure:
             compare(texts, claude, local, missing, tree)
@@ -751,10 +833,13 @@ def filed(name, origin, target, d, ai, how):
     return events
 
 
-MAC_DONE = {"ranger": "rangé par le Mac", "doublon": "doublon jeté par le Mac", "vers_a_trier": "mis à trier par le Mac", "deposer": "déposé par le Mac"}
-MAC_VERB = {"ranger": "le ranger", "doublon": "le mettre à la Corbeille", "vers_a_trier": "le mettre dans 00 À trier", "deposer": "l'écrire"}
+MAC_DONE = {"ranger": "rangé par le Mac", "doublon": "doublon jeté par le Mac", "vers_a_trier": "mis à trier par le Mac", "deposer": "déposé par le Mac",
+            "archiver": "archivé par le Mac", "supprimer": "supprimé par le Mac"}
+MAC_VERB = {"ranger": "le ranger", "doublon": "le mettre à la Corbeille", "vers_a_trier": "le mettre dans 00 À trier", "deposer": "l'écrire",
+            "archiver": "l'archiver", "supprimer": "le mettre à la Corbeille"}
 MAC_FINE = ("ok", "absent", "modifié depuis la décision")   # the Mac's statuses that are no failure
-DRIVE_WHAT = {"doublon": "mise à la corbeille du Drive", "vers 00 À trier": "déplacement vers 00 À trier", "rangement": "rangement dans le Drive"}
+DRIVE_WHAT = {"doublon": "mise à la corbeille du Drive", "vers 00 À trier": "déplacement vers 00 À trier", "rangement": "rangement dans le Drive",
+              "archivage": "archivage dans le Drive", "suppression": "mise à la corbeille du Drive"}
 
 
 DOWNLOADS_LOGGED = os.path.join(DATA, "downloads-logged.json")   # server: ids of the Mac's downloads already in the journal
@@ -793,9 +878,11 @@ def _mac_event(a, status):
     else:
         obj = os.path.basename(src.get("chemin", ""))
         fields = {"src": place(src.get("racine"), os.path.dirname(src.get("chemin", ""))),
-                  "dst": place(target["racine"], target["chemin"]) if target else "Corbeille du Mac" if kind == "doublon" else where(DRIVE_INBOX)}
+                  "dst": place(target["racine"], os.path.dirname(target["chemin"]) if kind == "archiver" else target["chemin"]) if target
+                  else "Corbeille du Mac" if kind in ("doublon", "supprimer") else where(DRIVE_INBOX)}
     if status == "ok":
-        return MAC_DONE.get(kind, "fait par le Mac"), obj, {**fields, "detail": f"identique à {twin(a['original'])}" if a.get("original") else None}
+        return MAC_DONE.get(kind, "fait par le Mac"), obj, {**fields, "detail": f"identique à {twin(a['original'])}" if a.get("original")
+                                                             else a.get("raison") if kind in REVIEW_KINDS else None}
     if status in MAC_FINE:
         return "annulé", obj, {**fields, "detail": "le Mac ne l'a plus trouvé : déplacé ou supprimé entre-temps" if status == "absent"
                                else "modifié depuis la décision : il sera examiné de nouveau"}
@@ -828,6 +915,437 @@ def _public_reason(e, step):
     return f"erreur {type(e).__name__}"
 
 
+# ---- the review of the theme folders: each document already filed is kept, archived or trashed (--decide only) ----
+# Its state, review.json in FILE_SORTER_DATA, is the server's own (English keys): "files", each document read, by "root|path|size" (path
+# relative to the root, NFC): {"path": its real relative path, "decision", "confidence", "reason", "twin": the real path of the copy kept,
+# "engine", "model", "time", "state": kept | pending (to archive or trash: a proposal of the trial, or waiting for the Mac) | done | failed |
+# unanswered, "tries": how many questions left it without an answer}; "cursor": the last folder read entirely; "rest_until", "pause_until";
+# "sweep": the counts of the walk under way; "first_sweep": when the first walk over every folder ended (its end is notified once);
+# "withdrawn": {action id: {"action", "time"}}, the plan's actions taken back when the review stopped, a week long.
+
+# The review's answer format. The keys are French, like the filing's: "raison" comes first, so that the model says why before it decides.
+REVIEW_SCHEMA = {"type": "object", "required": ["fichiers"], "properties": {"fichiers": {"type": "array", "items": {
+    "type": "object", "required": ["fichier", "raison", "decision", "doublon_de", "confiance"],
+    "properties": {"fichier": {"type": "string"}, "raison": {"type": "string"}, "decision": {"type": "string", "enum": list(DECISIONS)},
+                   "doublon_de": {"type": ["string", "null"]}, "confiance": {"type": "number"}}}}}}
+REVIEW_ITEM = {"raison": {"type": "string", "maxLength": 300}, "decision": {"type": "string", "enum": list(DECISIONS)},
+               "doublon_de": {"type": ["string", "null"], "maxLength": 200}, "confiance": {"type": "number"}}
+CODE_MARKERS = {"package.json", "composer.json", "pom.xml", ".git", "angular.json", "src", "app", "vendor", "node_modules"}   # as audit.py
+# a reason that speaks of a copy or a version (broadly: a word too many only keeps a document): then the kept one must be known, named in
+# doublon_de or, by its full name, in the reason itself
+COPY_WORDS = re.compile(r"\b(copie|doublon|double|duplicata|identique|exemplaire|version|réplique|déjà|autre fichier|même|qualité|"
+                        r"moins (bonne?|nette?|lisible|complète?)|plus (floue?|nette?|lisible|complète?|récente?))", re.I)
+PHOTOS = "80 Images"   # photos and screenshots: never reviewed (they keep their names too, see outcome)
+
+
+def review_prompt(root, folder, files, archive, blocks, local=False):
+    # French on purpose, like the filing's prompt: the owner's documents, folders and rules are French. What is current, what is kept as a
+    # proof and what is of no use are the owner's words (ticket 14 of 05/11/2026: temporary files, several identity cards, mail
+    # attachments, terms of sale); his rules.md comes after and may add his own.
+    confidence = ('- "confiance" : ta certitude sur cette décision, de 0 (au hasard) à 1 (certain). Si tu n\'es pas sûr, mets moins de 0.8 : '
+                  'le fichier restera en place.' if local else
+                  '- "confiance" entre 0 et 1. Si tu n\'es pas sûr, mets moins de 0.8 : le fichier restera en place.')
+    return f"""Tu fais le ménage dans les documents personnels de {SETTINGS['proprietaire']}, rangés par thèmes dans son {'Google Drive' if root == 'drive' else 'iCloud Drive'}. Nous sommes le {datetime.now():%d/%m/%Y}.
+Les dossiers par thèmes ne gardent que ce qui sert encore ; le reste part dans « {archive} » (au même chemin) ou à la corbeille.
+
+Dossier relu : « {folder} ». Tous ses fichiers, pour repérer les doublons et les versions plus récentes :
+{files}
+
+Pour chaque fichier examiné plus bas, "decision" vaut :
+- "garder" : encore d'actualité ou utile : pièce d'identité ou titre encore valable, contrat, bail, assurance, prêt ou abonnement en cours, diplôme, acte d'état civil, document médical utile, garantie d'un bien encore possédé ; facture, bulletin de paie, avis d'impôt, relevé ou déclaration de l'année en cours ou des deux précédentes. Dans le doute, garder.
+- "archiver" : ne sert plus au quotidien mais peut encore servir de preuve : pièce périmée ou remplacée par une plus récente, contrat, bail ou abonnement terminé, ancien logement ou ancien employeur, dossier clos ; facture, bulletin de paie, avis d'impôt, relevé ou déclaration plus anciens.
+- "supprimer" (corbeille) : sans intérêt : conditions générales (de vente, d'utilisation), notice, mentions légales, politique de confidentialité, publicité, newsletter, document générique qui ne le concerne pas personnellement ; fichier temporaire dont l'usage est passé (pré-demande, convocation, rendez-vous, billet ou réservation passés, code, QR code, brouillon) ; ou copie moins bonne d'un autre fichier examiné plus bas (le même document : scan plus flou, photo d'un document déjà scanné, version incomplète).
+- Jamais "supprimer" une facture, un justificatif comptable ou fiscal, un bulletin de paie, un contrat signé, une pièce d'identité ou un acte, sauf la copie moins bonne d'un autre fichier examiné : archive-les plutôt.
+- Plusieurs versions d'un même document : garder la meilleure (la plus récente encore valable, complète et lisible), archiver les anciennes, supprimer les copies moins bonnes. Le recto et le verso d'un même document ne sont pas des doublons.
+- "doublon_de" : OBLIGATOIRE pour une copie moins bonne à supprimer : le nom exact du fichier examiné qu'on garde à sa place ; sinon null.
+Règles du propriétaire :
+{RULES}
+{confidence}
+- "raison" : une phrase courte.
+- Le champ "fichier" doit reprendre EXACTEMENT le nom donné après "###". Réponds pour CHAQUE fichier.
+
+Fichiers à examiner :
+
+{chr(10).join(blocks)}
+"""
+
+
+def theme_walk(cursor):
+    """The theme folders of iCloud, then of the Drive, in order, after the cursor (the position of the last one read entirely): (position,
+    root, base, folder, its path relative to the root in NFC, its file names). Only the numbered folders of each root and what they hold:
+    neither the 00 inboxes, the archive, the photos and the settings' bundles, nor a code project. The order is that of the paths' parts,
+    so that what comes before the cursor is skipped without being listed."""
+    bundles = tuple(SETTINGS.get("paquets") or ()) + (PHOTOS,)
+    for i, (root, base) in enumerate((("icloud", ICLOUD), ("drive", DRIVE))):
+        if (cursor and i < cursor[0]) or not os.path.isdir(base):
+            continue
+        for r, ds, fs in os.walk(base):
+            rel = nfc(os.path.relpath(r, base))
+            parts = () if rel == "." else tuple(rel.split(os.sep))
+            here = (i,) + parts
+            if parts and CODE_MARKERS & set(ds + fs):
+                ds[:] = []
+                continue
+            kept = []
+            for d in sorted(ds, key=nfc):
+                n = nfc(d)
+                path = parts + (n,)
+                if n.startswith(".") or any(b in "/" + "/".join(path) for b in bundles):
+                    continue
+                if not parts and (not THEME.match(n) or n.startswith("00 ") or is_archive(n)):
+                    continue
+                if cursor and (i,) + path < cursor and cursor[:len(path) + 1] != (i,) + path:
+                    continue   # wholly before the cursor: read in an earlier pass
+                kept.append(d)
+            ds[:] = kept
+            if parts and not (cursor and here <= cursor):
+                yield here, root, base, r, rel, fs
+
+
+def exact_copies(docs):
+    """The documents of a folder identical to another one (same size, same SHA-1): {copy: the one kept}, which has the best name (no « (2) »,
+    a date first, the shortest)."""
+    by_size = {}
+    for p in docs:
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            continue
+        if size:
+            by_size.setdefault(size, []).append(p)
+    rank = lambda p: (bool(re.search(r"\(\d+\)", os.path.basename(p))), not re.match(r"\d{4}-\d\d-\d\d ", os.path.basename(p)),
+                      len(os.path.basename(p)), os.path.basename(p))
+    out = {}
+    for same in (s for s in by_size.values() if len(s) > 1):
+        by_hash = {}
+        for p in same:
+            try:
+                by_hash.setdefault(sha(p), []).append(p)
+            except OSError:
+                continue
+        for group in (g for g in by_hash.values() if len(g) > 1):
+            kept = min(group, key=rank)
+            out.update({p: kept for p in group if p != kept})
+    return out
+
+
+def listing(docs, chunk):
+    """The folder's documents as the question lists them, name and size: REVIEW_LISTING at most, around those asked about (docs sorted,
+    chunk among them)."""
+    shown = docs
+    if len(docs) > REVIEW_LISTING:
+        first = min(docs.index(p) for p in chunk)
+        start = max(0, min(first - REVIEW_LISTING // 4, len(docs) - REVIEW_LISTING))
+        shown = docs[start:start + REVIEW_LISTING]
+        shown += [p for p in chunk if p not in shown]
+    lines = [f"- {os.path.basename(p)} ({max(1, round(os.path.getsize(p) / 1024))} Ko)" for p in shown]
+    return "\n".join(lines + ([f"- … et {len(docs) - len(shown)} autre(s) fichier(s)"] if len(shown) < len(docs) else []))
+
+
+def judge(decided, groups, copies):
+    """The review's decisions once checked: {document: (decision, confidence, the copy kept in its place or None, reason, who decided,
+    the decision proposed when it was not followed)}. An unknown decision, or one below its threshold, keeps the document. A copy (named
+    so in doublon_de, or by its full name in its reason) is trashed only when the one kept was in the same question (the model saw both),
+    is named unambiguously, and is not trashed itself; the exact copies (copies, same bytes) always are."""
+    together = {p: g for g in groups for p in g}
+    order = sorted(decided, key=lambda p: nfc(os.path.basename(p)).lower())
+    out = {}
+    for p in order:
+        d, ai = decided[p]
+        decision = d.get("decision") if d.get("decision") in DECISIONS else "garder"
+        c = d.get("confiance")
+        conf = float(c) if type(c) in (int, float) and 0 <= c <= 1 else 0.0
+        reason, kept, proposed = str(d.get("raison") or "").strip().rstrip("."), None, None
+        if decision != "garder" and conf < REVIEW_THRESHOLD[decision]:
+            decision, proposed = "garder", f"{decision}, pas assez sûr"
+        others, cited = [x for x in together.get(p, ()) if x != p], []
+        if decision == "supprimer" and d.get("doublon_de"):
+            kept = named(d["doublon_de"], others)
+            if not kept:
+                decision, proposed = "garder", "supprimer comme copie d'un fichier qu'il n'a pas vu"
+        elif decision == "supprimer":   # without doublon_de: the files of the question its reason names, by their full names
+            cited = sorted((x for x in others if nfc(os.path.basename(x)).lower() in nfc(reason).lower()), key=lambda x: -len(os.path.basename(x)))
+            if COPY_WORDS.search(reason):   # a copy: the one it names is the one kept, else it stays
+                kept = cited[0] if len(cited) == 1 or (cited and len(os.path.basename(cited[0])) > len(os.path.basename(cited[1]))) else None
+                if not kept:
+                    decision, proposed = "garder", "supprimer comme copie, sans nommer le fichier gardé"
+        out[p] = [decision, conf, kept, reason, ai, proposed, cited]
+    for p in order:   # a document trashed while the one it names (its kept copy, or a file its reason cites) is trashed too stays
+        v = out[p]
+        if v[0] == "supprimer" and any(out.get(x, ["garder"])[0] == "supprimer" for x in ([v[2]] if v[2] else v[6])):
+            v[0], v[2], v[5] = "garder", None, "supprimer, mais l'autre exemplaire part aussi"
+    for p, kept in copies.items():
+        out[p] = ["supprimer", 1.0, kept, f"copie identique de « {os.path.basename(kept)} »", None, None]
+    return {p: tuple(v[:6]) for p, v in out.items()}
+
+
+class Review:
+    """The review of the theme folders within a --decide pass (FILE_SORTER_CLEANUP trial or on). The pass gives what it shares: the plan's
+    actions, the events logged once the plan is written (later), then the sources already in the plan (planned) and by_server for a move
+    in the Drive. Its actions taken out of the plan (withdrawn: the review stopped or back to its trial) are remembered a week, so that
+    what the Mac had already fetched and does anyway is still logged."""
+
+    def __init__(self, actions, later):
+        self.now = time.time()
+        state, broken = read_json(REVIEW, {}), False
+        if not isinstance(state, dict) or not isinstance(state.get("files", {}), dict):
+            log("review: review.json unreadable, the review starts again from the first folder")
+            state, broken = {}, True
+        state["files"] = {k: e for k, e in (state.get("files") or {}).items() if isinstance(e, dict) and isinstance(e.get("path"), str) and k.count("|") >= 2}
+        cursor = state.get("cursor")
+        if not (isinstance(cursor, list) and cursor and type(cursor[0]) is int and all(isinstance(x, str) for x in cursor[1:])):
+            state["cursor"] = None
+        state["withdrawn"] = {k: w for k, w in (state.get("withdrawn") or {}).items()
+                              if isinstance(w, dict) and isinstance(w.get("action"), dict) and w["action"].get("id") == k}
+        self.state, self.files, self.withdrawn = state, state["files"], state["withdrawn"]
+        self.read_as = None if broken else json.dumps(state, sort_keys=True)   # a broken file is written again at once
+        self.actions, self.later, self.planned, self.by_server = actions, later, set(), None
+        self.roots, self.index = {}, None   # which roots show their theme folders; the entries by folder (both once per pass)
+
+    def changed(self):
+        return json.dumps(self.state, sort_keys=True) != self.read_as
+
+    def save(self):
+        write_json(REVIEW, self.state)
+
+    def returned(self, a, status):
+        """What the Mac did with an action of the review: done, forgotten (gone or changed: read again where it is) or failed."""
+        key = f"{a['source']['racine']}|{nfc(a['source']['chemin'])}|{a['taille']}"
+        if key not in self.files:
+            return
+        if status == "ok":
+            self.files[key].update(state="done", time=self.now)
+        elif status in MAC_FINE:
+            del self.files[key]
+        else:
+            self.files[key].update(state="failed", time=self.now)
+
+    def due(self, key):
+        """A document to read: never read, read six months ago, or left without an answer (asked again an hour later, then a day, then a month,
+        so that a document a model always refuses never holds the walk back)."""
+        e = self.files.get(key)
+        if not e:
+            return True
+        wait = REVIEW_RETRIES[min(max(e.get("tries", 1), 1), len(REVIEW_RETRIES)) - 1] if e.get("state") == "unanswered" else REVIEW_AGAIN
+        return self.now - e.get("time", 0) >= wait
+
+    def why(self, e):
+        """A decision's reason, as the journal says it."""
+        reason = e.get("reason") or ""
+        if e.get("twin") and not reason.startswith("copie identique"):
+            return f"copie moins bonne de « {os.path.basename(e['twin'])} »" + (f" : {reason}" if reason else "")
+        return reason or "décision du modèle"
+
+    def mounted(self, root):
+        """A root shows its theme folders: a mount that is down or empty (iCloud waiting for its monthly reconnection) shows none, and then
+        the review neither forgets nor carries out anything there: every document would look gone."""
+        if root not in self.roots:
+            try:
+                base = DRIVE if root == "drive" else ICLOUD
+                self.roots[root] = any(THEME.match(nfc(d)) and not nfc(d).startswith("00 ") for d in os.listdir(base))
+            except OSError:
+                self.roots[root] = False
+        return self.roots[root]
+
+    def apply_pending(self):
+        """FILE_SORTER_CLEANUP=on: the decisions waiting (the trial's proposals first, a Drive move that failed) carried out, REVIEW_APPLY at most."""
+        waiting = sorted(((k, e) for k, e in self.files.items() if e.get("state") == "pending" and self.mounted(k.split("|", 1)[0])),
+                         key=lambda x: (x[1]["decision"] != "archiver", x[1].get("time", 0)))
+        done = 0
+        for key, e in waiting:
+            if done >= REVIEW_APPLY:
+                break
+            done += self.apply(key, e)
+
+    def apply(self, key, e):
+        """One decision to archive or trash carried out: in the Drive by the server (FILE_SORTER_DRIVE_RCLONE), in iCloud through the Mac's plan.
+        True when something was done or planned."""
+        root = key.split("|", 1)[0]
+        base = DRIVE if root == "drive" else ICLOUD
+        p, rel = os.path.join(base, e["path"]), nfc(e["path"])
+        if f"{root}|{rel}" in self.planned:
+            return False   # already in the plan, waiting for the Mac
+        if not os.path.isfile(p) or str(os.path.getsize(p)) != key.rsplit("|", 1)[1]:
+            del self.files[key]   # moved, removed or changed since the decision: read again wherever it is now
+            return False
+        archive, name, folder = archive_of(base), os.path.basename(p), os.path.dirname(e["path"])
+        if e["decision"] == "supprimer" and e.get("twin") and not any(os.path.exists(os.path.join(base, *x, e["twin"])) for x in ((), (archive,))):
+            e.update(state="failed", time=self.now)
+            log(f"ERREUR  {name} not trashed: the copy kept in its place is gone ({e['twin']})")
+            return False
+        why, ai = self.why(e), {k: e[k] for k in ("engine", "model", "confidence") if e.get(k) is not None}
+        origin = place(root, nfc(folder))
+        if root == "drive" and DRIVE_RCLONE:
+            if e["decision"] == "archiver":
+                target = self.by_server(p, "archivage", lambda: drive_move(p, os.path.join(archive, folder), name))
+                renamed = target and nfc(os.path.basename(target)) != nfc(name)
+                event = ("archivé", {"dst": place("drive", nfc(os.path.dirname(target or ""))), "detail": f"{why} ; archivé par le serveur dans le Drive"
+                                     + (f", sous le nom « {os.path.basename(target)} » : le sien était pris" if renamed else "")})
+            else:
+                target = self.by_server(p, "suppression", lambda: rclone("deletefile", "--drive-use-trash", DRIVE_RCLONE + os.path.relpath(p, DRIVE)) or "corbeille du Drive")
+                event = ("supprimé", {"dst": "corbeille du Drive", "detail": f"{why} ; mis à la corbeille du Drive par le serveur"})
+            if not target:   # by_server logged the failure: tried again at the next passes, three times
+                e["tries"] = e.get("tries", 0) + 1
+                if e["tries"] >= 3:
+                    e.update(state="failed", time=self.now)
+                return True
+            e.update(state="done", time=self.now)
+            activity.log(event[0], name, src=origin, **event[1], **ai)
+            log(f"{'ARCHIVÉ' if e['decision'] == 'archiver' else 'SUPPRIMÉ':8} {name}  ->  {event[1]['dst']} (by the server) — {why}")
+            return True
+        if e["decision"] == "archiver":
+            target = {"racine": root, "chemin": nfc(os.path.join(archive, e["path"]))}
+            self.actions.append(make_action("archiver", p, cible=target, raison=why))
+            self.later.append(("archivé", name, {"src": origin, "dst": place(root, os.path.dirname(target["chemin"])), "detail": f"{why} ; le Mac l'archive à son prochain passage", **ai}))
+        else:   # the kept copy goes with it: the Mac checks it is still there before trashing this one
+            self.actions.append(make_action("supprimer", p, raison=why, **({"garde": {"racine": root, "chemin": nfc(e["twin"])}} if e.get("twin") else {})))
+            self.later.append(("supprimé", name, {"src": origin, "dst": "Corbeille du Mac", "detail": f"{why} ; le Mac le met à la Corbeille à son prochain passage", **ai}))
+        self.planned.add(f"{root}|{rel}")
+        log(f"PLAN    {name}  ->  {e['decision']} — {why}")
+        return True
+
+    def step(self):
+        """One folder's documents read and decided, REVIEW_FILES at most, from the cursor on. True when a model was asked."""
+        if self.now < max(self.state.get("rest_until", 0), self.state.get("pause_until", 0)):
+            return False
+        cursor = tuple(self.state.get("cursor") or ())
+        for here, root, base, r, rel, names in theme_walk(cursor):
+            found = self.folder(root, base, r, rel, names)
+            if found:
+                return self.read(here, root, base, r, rel, *found)
+            self.state["cursor"] = list(here)   # nothing to read there: the next pass starts after it
+        self.walk_over()
+        return False
+
+    def folder(self, root, base, r, rel, names):
+        """A folder's documents to read: (the documents it keeps, to list in the question, those old enough to be read, both sorted, their
+        keys, the ones to ask about, all read after them) or None. Its documents are read together when they are REVIEW_FILES or fewer, so
+        that a new copy meets the former ones; never one already archived or trashed (the mount shows it a few minutes more) nor one whose
+        action waits for the Mac."""
+        if self.index is None:
+            self.index = {}
+            for k, e in self.files.items():
+                self.index.setdefault((k.split("|", 1)[0], nfc(os.path.dirname(e.get("path") or ""))), set()).add(k)
+        keys, listed, docs = {}, [], []
+        for f in names:
+            p = os.path.join(r, f)
+            if f.startswith(".") or not f.lower().endswith(REVIEW_EXT):
+                continue
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            keys[p] = key = f"{root}|{nfc(os.path.relpath(p, base))}|{st.st_size}"
+            if self.files.get(key, {}).get("state") == "done" or f"{root}|{nfc(os.path.relpath(p, base))}" in self.planned:
+                continue
+            listed.append(p)
+            if self.now - st.st_mtime >= REVIEW_MIN_AGE:   # its modification only: a document filed keeps its date, an edited one gets a new one
+                docs.append(p)
+        for k in self.index.get((root, rel), set()) - set(keys.values()):
+            self.files.pop(k, None)   # no longer there
+        order = lambda p: nfc(os.path.basename(p)).lower()
+        listed.sort(key=order)
+        docs.sort(key=order)
+        todo = [p for p in docs if self.due(keys[p])]
+        if not todo:
+            return None
+        # a document a model already left twice without an answer is asked again alone: its folder was read with it already
+        alone = all((self.files.get(keys[p]) or {}).get("state") == "unanswered" and self.files[keys[p]].get("tries", 1) >= 2 for p in todo)
+        chunk = todo[:1] if alone else docs if len(docs) <= REVIEW_FILES else todo[:REVIEW_FILES]   # alone: one a pass, a failure isolated
+        return listed, docs, keys, chunk, set(todo) <= set(chunk)
+
+    def read(self, here, root, base, r, rel, listed, docs, keys, chunk, complete):
+        """Asks about the chunk, records and carries out (on) or proposes (trial) the decisions, sums them up in one « revu »."""
+        copies = {p: k for p, k in exact_copies(docs).items() if p in chunk}
+        asked = [p for p in chunk if p not in copies]
+        archive = archive_of(base)
+        text = listing(listed, chunk)
+        q = Question(lambda blocks, local=False: review_prompt(root, rel, text, archive, blocks, local), REVIEW_SCHEMA, REVIEW_ITEM, (r, PREVIEWS),
+                     " (la première page suffit)")
+        REPORT.running("decide")
+        items = [(p, (lambda t: t[:REVIEW_CHARS] if t else None)(extract(p))) for p in asked]
+        unreadable = [p for p, t in items if not t and not p.lower().endswith(REVIEW_VISUAL)]   # neither text nor what Claude's Read shows
+        items = [(p, t) for p, t in items if p not in unreadable]
+        _, to_claude, local, missing, claude, failure, groups = ask(items, q, False, "review: ") if items else ([], [], {}, {}, {}, None, [])
+        verdicts = judge({**{p: (d, LOCAL_AI) for p, d in local.items()}, **{p: (d, CLAUDE_AI) for p, d in claude.items()}}, groups, copies)
+        verdicts.update({p: ("garder", 0.0, None, "format que la relecture ne lit pas", None, None) for p in unreadable})
+        to_claude = {p for p, _ in to_claude}
+        unanswered = [p for p in asked if p not in verdicts]
+        out_of_reach = failure is not None or any(missing.get(p, "").startswith("injoignable") for p in unanswered)
+        retried = []   # those left without an answer that will be asked again
+        input_error = failure is not None and re.search(r"invalid_request|could not process|too (long|large)|exceed", str(failure), re.I)
+        for p in unanswered:   # asked again an hour later, then a day, then a month (due)
+            prev = self.files.get(keys[p]) or {}
+            if prev and prev.get("state") != "unanswered" and not self.due(keys[p]):
+                continue   # read again only with its folder: its former decision stands
+            retried.append(p)
+            why = missing.get(p) or (f"Claude : {public_reason(failure, 'decide')}" if failure and p in to_claude else "absent de sa réponse")
+            # a model out of reach (unreachable, its usage limit) is no fault of the document: only what failed for this question counts
+            own = not (missing.get(p, "").startswith("injoignable") or (failure is not None and p in to_claude and not input_error))
+            self.files[keys[p]] = {"path": os.path.relpath(p, base), "state": "unanswered", "time": self.now, "reason": why,
+                                   "tries": (prev.get("tries", 0) if prev.get("state") == "unanswered" else 0) + own}
+            log(f"SANS RÉPONSE {os.path.basename(p)}  (review: {why}; try {self.files[keys[p]]['tries']})")
+        trial, counts, start = CLEANUP != "on", {d: 0 for d in DECISIONS}, len(self.later)
+        for p, (decision, conf, kept, reason, ai, proposed) in verdicts.items():
+            counts[decision] += 1
+            prev = self.files.get(keys[p]) or {}
+            e = self.files[keys[p]] = {"path": os.path.relpath(p, base), "decision": decision, "confidence": round(conf, 3), "reason": reason,
+                                       "twin": kept and os.path.relpath(kept, base), **(ai or {}), "time": self.now,
+                                       "state": "kept" if decision == "garder" else "pending"}
+            log(f"RELU    {os.path.basename(p)}  {decision} ({conf:.2f}{', ' + proposed if proposed else ''}) — {self.why(e)}")
+            if decision == "garder":
+                continue
+            if not trial:
+                self.apply(keys[p], e)
+                continue
+            if prev.get("state") == "pending" and (prev.get("decision"), prev.get("twin")) == (decision, e["twin"]):
+                continue   # read again with its folder, the same proposal: already in the journal
+            fields = {"src": place(root, rel), "detail": f"essai, rien n'a bougé : {self.why(e)}", **({**ai, "confidence": conf} if ai else {})}
+            if decision == "archiver":
+                self.later.append(("à archiver", os.path.basename(p), {**fields, "dst": place(root, nfc(os.path.join(archive, rel)))}))   # the name stays
+            else:
+                self.later.append(("à supprimer", os.path.basename(p), {**fields, "dst": "corbeille du Drive" if root == "drive" else "Corbeille du Mac"}))
+        if verdicts:
+            words = ("à archiver", "à supprimer") if trial else ("archivé(s)", "supprimé(s)")
+            summary = (f"{len(verdicts)} document(s) relu(s) : {counts['garder']} gardé(s), {counts['archiver']} {words[0]}, {counts['supprimer']} {words[1]}"
+                       + (f", {len(unanswered)} sans réponse" if unanswered else "")
+                       + (" ; essai : rien n'a bougé" if trial else ""))
+            self.later.insert(start, ("revu", place(root, rel), {"detail": summary}))   # before its decisions: above them in the journal, newest first
+            log(f"REVU    {place(root, rel)} : {summary}")
+            sweep = self.state.setdefault("sweep", {})
+            for k, n in (("files", len(verdicts)), ("archiver", counts["archiver"]), ("supprimer", counts["supprimer"])):
+                sweep[k] = sweep.get(k, 0) + n
+        if out_of_reach:   # a model failed or could not be reached: the review waits an hour, the inboxes do not
+            self.state["pause_until"] = self.now + REVIEW_PAUSE
+            why = public_reason(failure, "decide") if failure else "modèle local injoignable"
+            REPORT.set("decide", "failed", f"relecture des dossiers en pause une heure : {why}")
+            log(f"review: {len(unanswered)} document(s) without an answer ({why}): the review waits an hour")
+        else:
+            REPORT.set("decide", "ok")
+        # the folder is done once its documents are read; after a failure, the same ones are asked again, three times at most
+        if complete and not (out_of_reach and any(self.files[keys[p]]["tries"] < len(REVIEW_RETRIES) for p in retried)):
+            self.state["cursor"] = list(here)
+        return True
+
+    def walk_over(self):
+        """Every folder read: the next walk in REVIEW_REST; what no longer exists is forgotten; the end of the first walk is notified."""
+        sweep = self.state.pop("sweep", None) or {}
+        self.state.update(cursor=None, rest_until=self.now + REVIEW_REST)
+        for k in [k for k, e in self.files.items() if self.mounted(k.split("|", 1)[0])
+                  and not os.path.exists(os.path.join(DRIVE if k.startswith("drive|") else ICLOUD, e.get("path") or "?"))]:
+            del self.files[k]
+        if sweep.get("files"):
+            log(f"REVU    every theme folder read: {sweep['files']} document(s), {sweep.get('archiver', 0)} to archive, {sweep.get('supprimer', 0)} to trash")
+        if sweep.get("files") and not self.state.get("first_sweep"):
+            self.state["first_sweep"] = self.now
+            n, a, s = sweep["files"], sweep.get("archiver", 0), sweep.get("supprimer", 0)
+            notify(f"Relecture des dossiers terminée : {n} documents relus, {a} archivés, {s} mis à la corbeille" if CLEANUP == "on" else
+                   f"Relecture d'essai des dossiers terminée : {n} documents relus, {a} à archiver et {s} à supprimer proposés, rien n'a bougé. "
+                   "Le détail est dans le journal d'activité")
+
+
 def stopped(signum, frame):
     """systemd stops the pass (time is over, or the server shuts down): the step it was at fails, then the pass ends."""
     REPORT.fail("arrêté avant la fin : délai dépassé ou arrêt du serveur")
@@ -840,6 +1358,8 @@ def decide():
     jointes). Into iCloud, and out of iCloud, only the Mac moves: plan.json keeps the actions it has not returned yet. Inside the Drive,
     with FILE_SORTER_DRIVE_RCLONE, the server files itself: editable documents into the tree, doubtful invoices into 00 À trier,
     duplicates to the Drive's trash. A source already planned or just handled is not asked about again.
+    Then the review of the theme folders (FILE_SORTER_CLEANUP trial or on, class Review): what the Mac did with its actions, the decisions
+    waiting once the trial is lifted, and, when the inboxes left the models free, the next documents of a folder.
     The journal gets each decision and each action (the server's at once, the plan's once plan.json is written, so that a pass that
     fails before is not logged twice) and what the Mac returned; the step report follows the pass."""
     lock = open(LOCK, "w")
@@ -855,15 +1375,40 @@ def decide():
         results = read_json(RESULTS, {})
         returned = results.get("appliques", {})
         done = {k: v for k, v in plan.get("faites", {}).items() if time.time() - v[1] < 3600}   # sources handled, until the mounts show it
-        actions, came_back = [], []
+        actions, came_back, reviewed = [], [], []   # reviewed: the review's actions the Mac returned, with their status
+        try:
+            review = Review(actions, later)
+        except Exception as e:   # never the inboxes held back by the review
+            review = None
+            log(f"ERREUR  review: {type(e).__name__} {e}")
+        withdrawn = review.withdrawn if review else {}   # the review's actions taken out of the plan, while the Mac may still return them
+
+        def came(a):   # an action the Mac returned: its event, and the review's state
+            done[f"{a['source']['racine']}|{a['source']['chemin']}"] = [returned[a["id"]], time.time()]
+            log(f"MAC     {a['type']} {a['source']['chemin']} : {returned[a['id']]}")
+            came_back.append(returned[a["id"]])
+            later.append(mac_event(a, returned[a["id"]]))
+            if a.get("type") in REVIEW_KINDS:
+                reviewed.append((a, returned[a["id"]]))
+            withdrawn.pop(a["id"], None)
+
         for a in plan.get("actions", []):
             if a["id"] in returned:
-                done[f"{a['source']['racine']}|{a['source']['chemin']}"] = [returned[a["id"]], time.time()]
-                log(f"MAC     {a['type']} {a['source']['chemin']} : {returned[a['id']]}")
-                came_back.append(returned[a["id"]])
-                later.append(mac_event(a, returned[a["id"]]))
+                came(a)
+            elif a.get("type") in REVIEW_KINDS and CLEANUP != "on":   # the review stopped or back to its trial: what the Mac has not done yet
+                withdrawn[a["id"]] = {"action": a, "time": time.time()}   # leaves the plan; its decision waits in review.json
+                later.append(("annulé", os.path.basename(a["source"]["chemin"]), {"src": place(a["source"]["racine"], os.path.dirname(a["source"]["chemin"])),
+                                                                                  "detail": f"relecture {'arrêtée' if CLEANUP == 'off' else 'revenue à son essai'} : "
+                                                                                            "retiré du plan, le Mac ne le fera pas"}))
+                log(f"review: {a['type']} {a['source']['chemin']} withdrawn from the Mac's plan (FILE_SORTER_CLEANUP={CLEANUP})")
             elif time.time() - a.get("cree_le", 0) < 7 * 86400:   # an action not returned within a week is dropped
                 actions.append(a)
+                withdrawn.pop(a["id"], None)   # planned again, the review back on
+        for ident, w in list(withdrawn.items()):   # withdrawn, but the Mac had fetched the plan before and did it anyway
+            if ident in returned and ident not in {a["id"] for a in plan.get("actions", [])}:
+                came(w["action"])
+            elif time.time() - w.get("time", 0) > 8 * 86400:
+                del withdrawn[ident]   # the Mac keeps what it applied a week: nothing can come back after
         if came_back:
             errors = sum(status not in MAC_FINE for status in came_back)
             REPORT.set("icloud", *(("failed", f"le Mac n'a pas pu appliquer {errors} action(s) du plan") if errors else ("ok",)))
@@ -943,10 +1488,29 @@ def decide():
                 actions.append(make_action("ranger", src, cible={"racine": base, "chemin": nfc(os.path.join(dest, new))}, confiance=conf, raison=d.get("raison", "")))
                 log(f"PLAN    {name}  ->  {'Drive/' if base == 'drive' else ''}{os.path.join(dest, new)}  ({conf:.2f}) — {d.get('raison')}")
                 later += filed(name, origin, place(base, nfc(os.path.join(dest, new))), d, ai, "le Mac le range à son prochain passage")
+        if review:
+            try:
+                review.planned, review.by_server = {f"{a['source']['racine']}|{a['source']['chemin']}" for a in actions}, by_server
+                for a, status in reviewed:
+                    review.returned(a, status)
+                if CLEANUP == "on":
+                    review.apply_pending()
+                if CLEANUP in ("trial", "on") and not files:   # the models are free: the inboxes had nothing for them in this pass
+                    review.step()
+            except Exception as e:   # a review that fails never holds back the inboxes: it waits an hour
+                review.state["pause_until"] = time.time() + REVIEW_PAUSE
+                log(f"ERREUR  review: {type(e).__name__} {e}")
+                REPORT.set("decide", "failed", f"relecture des dossiers en pause une heure : erreur {type(e).__name__}")
+                activity.log("échec", "relecture des dossiers", detail=f"en pause une heure : {type(e).__name__} : {e}")
         REPORT.set("drive", *(("failed", f"{len(failures)} déplacement(s) dans le Drive en échec, nouvel essai au prochain passage") if failures
                               else ("ok",) if in_drive else ("skipped",)))
         REPORT.running("plan")
         write_json(PLAN, {"genere_a": datetime.now().isoformat(timespec="seconds"), "actions": actions, "faites": done})
+        if review and review.changed():
+            try:
+                review.save()
+            except OSError as e:   # the next pass reads the former state again: at worst a document is asked about twice
+                log(f"ERREUR  review.json not written: {e}")
         REPORT.set("plan", "ok" if actions else "skipped")
         for action, obj, fields in later + downloads_events(results.get("telechargements") or []):
             activity.log(action, obj, **fields)
@@ -1006,7 +1570,8 @@ def apply_plan():
 
 
 def apply_action(a, moved, kept):
-    """One action of the plan, after checks: paths inside iCloud or the Drive, source in an inbox, size unchanged.
+    """One action of the plan, after checks: paths inside iCloud or the Drive, source in an inbox (in a theme folder for the review's
+    archiver and supprimer: never an inbox nor the archive; archiver moves only into the archive of the same root), size unchanged.
     Returns the status to send back to the server, or None to retry on the next pass (file not downloaded yet).
     The statuses and the error messages below stay in French: they go back to the server in results.json."""
     roots = {"icloud": ICLOUD, "drive": DRIVE}
@@ -1027,11 +1592,17 @@ def apply_action(a, moved, kept):
         log(f"DÉPOSÉ  {os.path.relpath(target, roots[a['cible']['racine']])}")
         return "ok"
     src = resolve(a["source"])
-    if nfc(os.path.dirname(src)) not in (nfc(INBOX), nfc(GMAIL_INBOX), nfc(DRIVE_INBOX), nfc(ATTACH_INBOX)):
+    if a["type"] in REVIEW_KINDS:
+        top = nfc(a["source"]["chemin"]).split("/")
+        if len(top) < 2 or not THEME.match(top[0]) or top[0].startswith("00 ") or is_archive(top[0]):
+            raise ValueError("source hors des dossiers par thèmes")
+        if any(b in "/" + "/".join(top[:-1]) for b in tuple(SETTINGS.get("paquets") or ()) + (PHOTOS,)):
+            raise ValueError("source dans un dossier que la relecture ne touche pas")
+    elif nfc(os.path.dirname(src)) not in (nfc(INBOX), nfc(GMAIL_INBOX), nfc(DRIVE_INBOX), nfc(ATTACH_INBOX)):
         raise ValueError("source hors des boîtes d'arrivée")
     if not os.path.exists(src):
         return "absent"
-    if not materialize(src):
+    if a["type"] not in REVIEW_KINDS and not materialize(src):   # a document only in the cloud is moved or trashed as it is, not downloaded first
         return None
     if os.path.getsize(src) != a["taille"]:
         return "modifié depuis la décision"
@@ -1052,9 +1623,41 @@ def apply_action(a, moved, kept):
         dest = os.path.dirname(a["cible"]["chemin"])
         moved.append(f"{os.path.basename(target)} → {dest}")
         log(f"RANGÉ   {name}  ->  {'Drive/' if a['cible']['racine'] == 'drive' else ''}{os.path.relpath(target, roots[a['cible']['racine']])}  ({a.get('confiance', 0):.2f}) — {a.get('raison', '')}")
+    elif a["type"] == "archiver":   # the review: a document no longer current, into the archive, at the same path
+        if a["cible"]["racine"] != a["source"]["racine"] or not is_archive(nfc(a["cible"]["chemin"]).split("/")[0]):
+            raise ValueError("destination hors des archives")
+        target = unique(resolve(a["cible"]))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.move(src, target)
+        prune(os.path.dirname(src), roots[a["source"]["racine"]])
+        log(f"ARCHIVÉ {name}  ->  {'Drive/' if a['cible']['racine'] == 'drive' else ''}{os.path.relpath(target, roots[a['cible']['racine']])} — {a.get('raison', '')}")
+    elif a["type"] == "supprimer":   # the review: a document of no use, or a lesser copy, to the Trash
+        kept = a.get("garde")   # a copy: the one kept in its place, still in its folder or archived since
+        if kept and not any(os.path.exists(os.path.join(roots[kept["racine"]], *x, nfc(kept["chemin"])))
+                            for x in ((), (archive_of(roots[kept["racine"]]),))):
+            raise ValueError("l'exemplaire gardé à sa place n'est plus là")
+        to_trash(src)
+        prune(os.path.dirname(src), roots[a["source"]["racine"]])
+        log(f"SUPPRIMÉ {name}  -> Trash — {a.get('raison', '')}")
     else:
         raise ValueError(f"action inconnue : {a['type']}")
     return "ok"
+
+
+def prune(folder, base):
+    """Mac: the folders an archiving or a deletion left empty go (a year, a quarter, a former case), but never a theme folder nor its
+    first sub-folders (« 20 Administratif/Logement »): they are the tree the sorting files into."""
+    while len(nfc(os.path.relpath(folder, base)).split(os.sep)) > 2 and not os.path.relpath(folder, base).startswith(".."):
+        try:
+            if [f for f in os.listdir(folder) if f != ".DS_Store"]:
+                return
+            if os.path.exists(os.path.join(folder, ".DS_Store")):
+                os.remove(os.path.join(folder, ".DS_Store"))
+            os.rmdir(folder)
+        except OSError:
+            return
+        log(f"VIDÉ    {os.path.relpath(folder, base)} (empty folder removed)")
+        folder = os.path.dirname(folder)
 
 
 def deposit():

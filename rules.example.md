@@ -2,3 +2,4 @@
 - Impôts et cotisations -> "20 Administratif/Impôts".
 - Pièces d'identité -> "10 Identité & Banque/Identité".
 - Captures d'écran -> "80 Images/Captures d'écran" ; photos -> "80 Images/Photos".
+- Ménage des dossiers : les bulletins de paie restent cinq ans dans leur dossier avant d'être archivés.

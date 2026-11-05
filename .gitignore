@@ -15,6 +15,7 @@ sort.lock
 data/
 activity.jsonl
 run-status.json
+review.json
 .*.failing
 # The same files under their French names, used until 03/11/2026: still ignored in case an old copy is left in a checkout
 reglages.json

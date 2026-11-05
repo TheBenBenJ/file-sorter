@@ -5,9 +5,11 @@ claude that answers from a table, a fake local model (the home server's OpenAI A
 a fake rclone that moves inside the fake Drive. Checked: the activity journal and the step report the Dashboard reads (activity.py), pass
 after pass: decisions, moves in the Drive, the Mac's results, a failing model, a failing Drive; the shadow mode of the server's unit
 (FILE_SORTER_SHADOW=1: Claude decides, the local model is compared), then the local model deciding for the files with text, its batches
-measured against its 16k-token slot, and the local model down.
+measured against its 16k-token slot, and the local model down; last, the review of the theme folders (keep, archive, trash): its trial,
+its guards (thresholds, copies, what it never reads), the trial lifted, the Mac carrying out archiver and supprimer (sort.py --apply,
+a fake trash), the models or a mount out of reach.
 The French file names and texts below are test data, as the owner's would be."""
-import contextlib, http.server, io, json, os, re, shutil, subprocess, sys, tempfile, threading
+import contextlib, http.server, io, json, os, re, shutil, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -120,6 +122,8 @@ prompt = sys.argv[sys.argv.index("-p") + 1]
 answers = json.load(open(os.environ["FAKE_ANSWERS"], encoding="utf-8"))
 names = re.findall(r"^### (.+)$", prompt, re.M)
 open(os.environ["FAKE_CLAUDE_LOG"], "a", encoding="utf-8").write(json.dumps(names) + "\\n")   # the files Claude was asked about
+if os.environ.get("FAKE_CLAUDE_FAIL_ON") in names:   # a file the API refuses (an image it cannot process): the whole question fails
+    sys.exit(print(json.dumps({{"type": "result", "is_error": True, "api_error": "invalid_request_error", "result": "Could not process image"}})) or 1)
 found = [{{"fichier": n, **answers[n]}} for n in names if n in answers]
 print(json.dumps({{"structured_output": {{"fichiers": found}}}}))
 """)
@@ -140,8 +144,9 @@ elif command == "moveto":
 elif command == "deletefile":
     os.remove(local(rest[-1]))
 """)
-for quiet in ("notifier", "osascript"):
-    (fake / quiet).write_text("#!/bin/sh\nexit 0\n")
+(fake / "notifier").write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{T}/notified.txt'\n")   # the phone's notifications, kept for the checks
+(fake / "osascript").write_text("#!/bin/sh\nexit 0\n")
+(fake / "trash").write_text("#!/bin/sh\nmkdir -p \"$HOME/.Trash\" && mv \"$1\" \"$HOME/.Trash/\"\n")   # the Mac's trash command
 for f in fake.iterdir():
     f.chmod(0o755)
 answers = T / "answers.json"
@@ -372,6 +377,401 @@ Local.refuse_over = 2
 p, seen = batches(150)
 Local.refuse_over = None
 check("batches: a question refused as too long is asked again in halves", p.returncode == 0 and max(x[0] for x in seen) <= 2 and sum(x[0] for x in seen) == 12)
+
+# ---- the review of the theme folders: keep, archive or trash what is already filed (FILE_SORTER_CLEANUP: trial by default, then on) ----
+R = T / "review"
+icloud2, drive2, data2 = R / "icloud", R / "drive", R / "data"
+for d in (data2, icloud2 / "00 À trier", drive2 / "00 À trier", drive2 / "00 Factures entrantes", drive2 / "00 Pièces jointes"):
+    d.mkdir(parents=True, exist_ok=True)
+ident, achats = icloud2 / "10 Identité & Banque" / "Identité", icloud2 / "60 Achats" / "Commandes"
+bail, factures, contrats = icloud2 / "20 Administratif" / "Logement" / "Ancien bail", icloud2 / "50 Travail" / "Factures 2019", drive2 / "50 Travail" / "Contrats"
+ident.mkdir(parents=True)
+write(ident / "2015-06-01 Préfecture - Carte d'identité.txt", "Carte nationale d'identité délivrée le 01/06/2015, expire le 01/06/2025. ")
+write(ident / "2024-05-02 Préfecture - Carte d'identité.txt", "Carte nationale d'identité délivrée le 02/05/2024, valable jusqu'en 2034. ")
+shutil.copy(ident / "2024-05-02 Préfecture - Carte d'identité.txt", ident / "2024-05-02 Préfecture - Carte d'identité (2).txt")   # the same bytes
+write(ident / "Pré-demande ANTS.txt", "Pré-demande de carte d'identité, numéro à présenter au rendez-vous du 12/04/2024. ")
+write(ident / "Récépissé.txt", "Récépissé de dépôt d'une demande de titre, 12/04/2024. ")
+for i, name in enumerate(("CNI recto.jpg", "CNI recto flou.jpg", "Carte identité photo.jpg", "Permis A.jpg", "Permis B.jpg")):
+    (ident / name).write_bytes(b"\xff\xd8\xff\xe0 image " + bytes([i]) * 50)   # no text: Claude reads them
+bail.mkdir(parents=True)
+write(bail / "2018-07-01 Agence - Bail.txt", "Bail d'habitation du 01/07/2018, résilié le 30/06/2021. ")
+factures.mkdir(parents=True)
+invoices = [f"2019-{m:02d}-28 EDF - Facture.txt" for m in range(1, 13)]
+for i, name in enumerate(invoices):
+    write(factures / name, f"Facture EDF n° {i} du 28/{i + 1:02d}/2019, électricité, montant. ")
+achats.mkdir(parents=True)
+write(achats / "CGV Boutique.txt", "Conditions générales de vente de la boutique, article 1, article 2. ")
+write(achats / "2026-10-02 Boutique - Facture.txt", "Facture de la boutique du 02/10/2026, montant TTC. ")
+contrats.mkdir(parents=True)
+write(contrats / "2019-01-01 Ancien employeur - Contrat.txt", "Contrat de travail du 01/01/2019, terminé le 31/12/2022. ")
+write(contrats / "Conditions générales.txt", "Conditions générales d'utilisation du service en ligne. ")
+write(contrats / "2026-01-01 Client - Contrat.txt", "Contrat de prestation en cours avec le client, 2026. ")
+never = {"IMG_0001.jpg": icloud2 / "80 Images" / "Photos", "Ancienne.txt": icloud2 / "90 Archives" / "10 Identité & Banque", "Raccourci.txt": icloud2 / "Shortcuts",
+         "Sauvegarde.txt": drive2 / "90 Archives" / "Sauvegardes", "Vrac.txt": icloud2, "Module.txt": icloud2 / "50 Travail" / "Code" / "src"}
+for name, folder in never.items():   # never read by the review: photos, the archive, a folder not numbered, the root, a code project
+    folder.mkdir(parents=True, exist_ok=True)
+    write(folder / name, "Un fichier que la relecture ne doit jamais lire. ")
+old = time.time() - 10 * 86400
+for f in R.rglob("*"):
+    if f.is_file():
+        os.utime(f, (old, old))
+write(achats / "Nouveau.txt", "Un document modifié aujourd'hui, laissé pour plus tard. ")   # too recent
+renv = {"FILE_SORTER_ICLOUD": str(icloud2), "FILE_SORTER_DRIVE": str(drive2), "FILE_SORTER_DATA": str(data2), "FAKE_DRIVE": str(drive2)}
+rjournal = data2 / "activity.jsonl"
+revents = lambda: [json.loads(x) for x in rjournal.read_text(encoding="utf-8").splitlines()] if rjournal.exists() else []
+rreport = lambda: json.loads((data2 / "run-status.json").read_text(encoding="utf-8"))
+rstate = lambda: json.loads((data2 / "review.json").read_text(encoding="utf-8"))
+rplan = lambda: json.loads((data2 / "plan.json").read_text(encoding="utf-8"))
+
+
+def rrun(*args, **env):
+    return run(*args, **{**renv, **env})
+
+
+def review_answers(table):
+    """What the two fake models answer to the review's question: {name: (decision, doublon_de, confiance, raison)}."""
+    rows = {n: {"raison": why, "decision": dec, "doublon_de": twin, "confiance": c} for n, (dec, twin, c, why) in table.items()}
+    answers.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    Local.answers = rows
+
+
+review_answers({"2015-06-01 Préfecture - Carte d'identité.txt": ("archiver", None, 0.92, "carte expirée en 2025, remplacée par celle de 2024."),
+                "2024-05-02 Préfecture - Carte d'identité.txt": ("garder", None, 0.95, "carte valable"),
+                "Pré-demande ANTS.txt": ("supprimer", None, 0.95, "pré-demande dont le rendez-vous est passé"),
+                "Récépissé.txt": ("archiver", None, 0.6, "récépissé ancien"),   # not sure enough: it stays
+                "CNI recto.jpg": ("garder", None, 0.9, "scan net de la carte"),
+                "CNI recto flou.jpg": ("supprimer", "CNI recto.jpg", 0.95, "même carte, plus floue"),
+                "Carte identité photo.jpg": ("supprimer", "2024-05-02 Préfecture - Carte d'identité.txt", 0.95, "photo de la carte"),   # not in its question
+                "Permis A.jpg": ("supprimer", "Permis B.jpg", 0.95, "même permis"), "Permis B.jpg": ("supprimer", "Permis A.jpg", 0.95, "même permis"),
+                "2018-07-01 Agence - Bail.txt": ("archiver", None, 0.9, "bail résilié en 2021"),
+                **{name: ("archiver", None, 0.9, "facture de 2019") for name in invoices},
+                "CGV Boutique.txt": ("supprimer", None, 0.97, "conditions générales de vente sans intérêt"),
+                "2026-10-02 Boutique - Facture.txt": ("garder", None, 0.9, "facture récente"),
+                "2019-01-01 Ancien employeur - Contrat.txt": ("archiver", None, 0.9, "contrat terminé en 2022"),
+                "Conditions générales.txt": ("supprimer", None, 0.95, "conditions d'utilisation génériques"),
+                "2026-01-01 Client - Contrat.txt": ("garder", None, 0.95, "contrat en cours")})
+claude_asked()
+Local.asked.clear()
+(T / "notified.txt").unlink(missing_ok=True)
+p = rrun("--decide")
+ev = revents()
+check("review, trial: the pass goes through, the first theme folder read whole (10 documents), in one « revu »", p.returncode == 0 and
+      [(e["object"], e["detail"]) for e in ev if e["action"] == "revu"] == [("iCloud/10 Identité & Banque/Identité",
+                                                                             "10 document(s) relu(s) : 5 gardé(s), 1 à archiver, 4 à supprimer ; essai : rien n'a bougé")]
+      or print(p.stdout[-3000:], p.stderr[-3000:]))
+e = by(ev, "à archiver", "2015-06-01 Préfecture - Carte d'identité.txt")
+check("review, trial: an expired card « à archiver », to the archive at the same path, by the local model, nothing moved",
+      e and e["from"] == "iCloud/10 Identité & Banque/Identité" and e["to"] == "iCloud/90 Archives/10 Identité & Banque/Identité"
+      and e["detail"] == "essai, rien n'a bougé : carte expirée en 2025, remplacée par celle de 2024" and e["engine"] == "local" and e["confidence"] == 0.92
+      and (ident / "2015-06-01 Préfecture - Carte d'identité.txt").exists())
+e = by(ev, "à supprimer", "2024-05-02 Préfecture - Carte d'identité (2).txt")
+check("review, trial: an exact copy « à supprimer », its original named, without asking a model", e and e["to"] == "Corbeille du Mac"
+      and e["detail"] == "essai, rien n'a bougé : copie identique de « 2024-05-02 Préfecture - Carte d'identité.txt »" and "engine" not in e)
+e = by(ev, "à supprimer", "CNI recto flou.jpg")
+check("review, trial: a lesser copy seen in the same question « à supprimer », by Claude, the one kept named",
+      e and e["engine"] == "claude" and e["detail"] == "essai, rien n'a bougé : copie moins bonne de « CNI recto.jpg » : même carte, plus floue")
+check("review, trial: a file of no more use « à supprimer »", by(ev, "à supprimer", "Pré-demande ANTS.txt"))
+check("review, trial: kept, a copy of a file its model did not see, a decision not sure enough, and one of two copies naming each other",
+      not any(by(ev, a, n) for a in ("à archiver", "à supprimer") for n in ("Carte identité photo.jpg", "Récépissé.txt", "Permis A.jpg", "CNI recto.jpg"))
+      and by(ev, "à supprimer", "Permis B.jpg")["detail"].startswith("essai, rien n'a bougé : copie moins bonne de « Permis A.jpg »"))
+check("review, trial: the files with text to the local model even under the shadow, the others to Claude, the copy to none",
+      [sorted(x["names"]) for x in Local.asked] == [sorted(["2015-06-01 Préfecture - Carte d'identité.txt", "2024-05-02 Préfecture - Carte d'identité.txt",
+                                                            "Pré-demande ANTS.txt", "Récépissé.txt"])]
+      and [sorted(x) for x in claude_asked()] == [sorted(["CNI recto.jpg", "CNI recto flou.jpg", "Carte identité photo.jpg", "Permis A.jpg", "Permis B.jpg"])])
+sent = Local.asked[0]["body"]
+item = sent["response_format"]["json_schema"]["schema"]["properties"]["fichiers"]["items"]["properties"]
+check("review, trial: the question names the folder and lists all its files; strict schema, the reason before the decision, a closed list",
+      "Dossier relu : « 10 Identité & Banque/Identité »" in sent["messages"][0]["content"] and "- Permis B.jpg (1 Ko)" in sent["messages"][0]["content"]
+      and list(item) == ["fichier", "raison", "decision", "doublon_de", "confiance"] and item["decision"]["enum"] == ["garder", "archiver", "supprimer"]
+      and "### Récépissé.txt" in sent["messages"][0]["content"] and "### CNI recto.jpg" not in sent["messages"][0]["content"])
+check("review, trial: nothing in the plan, every file still there, the step « decide » ok",
+      not rplan()["actions"] and all((ident / n).exists() for n in ("Pré-demande ANTS.txt", "CNI recto flou.jpg", "Permis B.jpg"))
+      and rreport()["steps"]["decide"] == "ok")
+st = rstate()
+check("review, trial: each decision kept in review.json, the proposals waiting", len(st["files"]) == 10
+      and sum(e["state"] == "pending" for e in st["files"].values()) == 5 and st["cursor"] == [0, "10 Identité & Banque", "Identité"])
+
+Local.asked.clear()
+for _ in range(6):   # five folders more, then the end of the walk
+    p = rrun("--decide")
+ev = revents()
+check("review, trial: one folder a pass, a big one in two (10, then 2), each in its « revu »",
+      [e["object"] for e in ev if e["action"] == "revu"] == ["iCloud/10 Identité & Banque/Identité", "iCloud/20 Administratif/Logement/Ancien bail",
+                                                             "iCloud/50 Travail/Factures 2019", "iCloud/50 Travail/Factures 2019", "iCloud/60 Achats/Commandes",
+                                                             "Google Drive/50 Travail/Contrats"]
+      and [x["detail"].split(" :")[0] for x in ev if x["object"] == "iCloud/50 Travail/Factures 2019"] == ["10 document(s) relu(s)", "2 document(s) relu(s)"])
+check("review, trial: a big folder's question lists its files around those asked", all(tokens + reserve + 256 <= 16384 for tokens, reserve in
+      [(x["tokens"], x["max_tokens"]) for x in Local.asked]) and any("2019-12-28 EDF - Facture.txt (1 Ko)" in x["body"]["messages"][0]["content"] for x in Local.asked))
+e = by(ev, "à supprimer", "Conditions générales.txt")
+check("review, trial: in the Drive too, the terms of use « à supprimer » to the Drive's trash, the old contract « à archiver »",
+      e and e["from"] == "Google Drive/50 Travail/Contrats" and e["to"] == "corbeille du Drive"
+      and by(ev, "à archiver", "2019-01-01 Ancien employeur - Contrat.txt")["to"] == "Google Drive/90 Archives/50 Travail/Contrats")
+asked_names = {n for x in Local.asked for n in x["names"]} | {n for x in claude_asked() for n in x}
+check("review: never the photos, the archive, a folder not numbered, the root, a code project, the inboxes, nor a file of the last two days",
+      not asked_names & (set(never) | {"Nouveau.txt"}) and not [x for x in ev if x["object"] in never or x["object"] == "Nouveau.txt"])
+check("review: a document of the last two days is listed to the model with the others, not asked about",
+      any("- Nouveau.txt (1 Ko)" in x["body"]["messages"][0]["content"] for x in Local.asked))
+notified = (T / "notified.txt").read_text(encoding="utf-8").splitlines() if (T / "notified.txt").exists() else []
+check("review, trial: the end of the first walk notified once, counts only, no file name",
+      notified == ["Tri des fichiers Relecture d'essai des dossiers terminée : 28 documents relus, 15 à archiver et 6 à supprimer proposés, rien n'a bougé. "
+                   "Le détail est dans le journal d'activité"])
+n = len(revents())
+Local.asked.clear()
+p = rrun("--decide")
+check("review: once every folder is read, the next walk waits an hour: no question, no event", p.returncode == 0 and not Local.asked
+      and not claude_asked() and len(revents()) == n)
+
+# the trial lifted: the trial's decisions carried out, the Drive's by the server, iCloud's by the Mac
+p = rrun("--decide", FILE_SORTER_CLEANUP="on")
+new = revents()[n:]
+e = by(new, "archivé", "2019-01-01 Ancien employeur - Contrat.txt")
+check("review, on: the server archives in the Drive, at the same path under 90 Archives", e and e["to"] == "Google Drive/90 Archives/50 Travail/Contrats"
+      and e["detail"] == "contrat terminé en 2022 ; archivé par le serveur dans le Drive" and (drive2 / "90 Archives/50 Travail/Contrats/2019-01-01 Ancien employeur - Contrat.txt").exists()
+      and not (contrats / "2019-01-01 Ancien employeur - Contrat.txt").exists())
+e = by(new, "supprimé", "Conditions générales.txt")
+check("review, on: the server sends the terms of use to the Drive's trash", e and e["to"] == "corbeille du Drive" and not (contrats / "Conditions générales.txt").exists()
+      and (contrats / "2026-01-01 Client - Contrat.txt").exists())
+kinds = sorted((a["type"], a["source"]["chemin"].rsplit("/", 1)[1]) for a in rplan()["actions"])
+check("review, on: iCloud's decisions go into the Mac's plan (archiver, supprimer), all applied at once (21 at most 40)", len(kinds) == 19 and
+      [k for k in kinds if k[0] == "supprimer"] == [("supprimer", n) for n in sorted(["2024-05-02 Préfecture - Carte d'identité (2).txt", "CGV Boutique.txt",
+                                                                                     "CNI recto flou.jpg", "Permis B.jpg", "Pré-demande ANTS.txt"])]
+      and by(new, "supprimé", "CGV Boutique.txt")["detail"] == "conditions générales de vente sans intérêt ; le Mac le met à la Corbeille à son prochain passage"
+      and by(new, "archivé", "2018-07-01 Agence - Bail.txt")["to"] == "iCloud/90 Archives/20 Administratif/Logement/Ancien bail")
+
+p = rrun("--decide", FILE_SORTER_CLEANUP="off")
+check("review off again: the review's actions the Mac has not done leave its plan, their decisions wait in review.json", p.returncode == 0
+      and not [a for a in rplan()["actions"] if a["type"] in ("archiver", "supprimer")]
+      and sum(e.get("state") == "pending" for e in rstate()["files"].values()) == 19)
+p = rrun("--decide", FILE_SORTER_CLEANUP="on")
+check("review on again: they come back into the plan, a copy with the one kept in its place",
+      len([a for a in rplan()["actions"] if a["type"] in ("archiver", "supprimer")]) == 19
+      and next(a for a in rplan()["actions"] if a["source"]["chemin"].endswith("CNI recto flou.jpg"))["garde"]
+      == {"racine": "icloud", "chemin": "10 Identité & Banque/Identité/CNI recto.jpg"})
+
+# while the Mac has not applied them, its documents are not read again, nor what the server already moved (the mount a few minutes behind)
+write(ident / "Attestation.txt", "Attestation de domicile pour la préfecture, 2024. ")
+write(contrats / "Avenant.txt", "Avenant au contrat de prestation du client, 2026. ")
+lagging = contrats / "2019-01-01 Ancien employeur - Contrat.txt"
+shutil.copy2(drive2 / "90 Archives/50 Travail/Contrats/2019-01-01 Ancien employeur - Contrat.txt", lagging)   # as the mount may still show it
+for f in (ident / "Attestation.txt", contrats / "Avenant.txt", lagging):
+    os.utime(f, (old, old))
+st = rstate()
+st["rest_until"] = 0
+(data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+kept_names = ("2024-05-02 Préfecture - Carte d'identité.txt", "CNI recto.jpg", "Permis A.jpg", "Carte identité photo.jpg", "Récépissé.txt", "Attestation.txt",
+              "2026-01-01 Client - Contrat.txt", "Avenant.txt")
+review_answers({x: ("garder", None, 0.9, "document utile") for x in kept_names})
+Local.asked.clear()
+claude_asked()
+before = len(rplan()["actions"])
+for _ in range(2):
+    p = rrun("--decide", FILE_SORTER_CLEANUP="on")
+asked_names = {n for x in Local.asked for n in x["names"]} | {n for x in claude_asked() for n in x}
+check("review, on: a small folder read again for a new document, without what waits for the Mac nor what the server already moved",
+      p.returncode == 0 and asked_names == set(kept_names) and len(rplan()["actions"]) == before)
+lagging.unlink()
+plan = rplan()
+kept_one = "60 Achats/Commandes/2026-10-02 Boutique - Facture.txt"
+photo, receipt = "80 Images/Photos/IMG_0001.jpg", "10 Identité & Banque/Identité/Récépissé.txt"
+plan["actions"] += [{**plan["actions"][0], "id": "bad-source", "source": {"racine": "icloud", "chemin": "00 À trier/x.txt"}},
+                    {"id": "bad-target", "type": "archiver", "source": {"racine": "icloud", "chemin": kept_one}, "taille": (icloud2 / kept_one).stat().st_size,
+                     "cible": {"racine": "icloud", "chemin": "30 Santé/x.txt"}, "cree_le": time.time()},
+                    {"id": "bad-photos", "type": "supprimer", "source": {"racine": "icloud", "chemin": photo}, "taille": (icloud2 / photo).stat().st_size,
+                     "cree_le": time.time()},
+                    {"id": "kept-gone", "type": "supprimer", "source": {"racine": "icloud", "chemin": receipt}, "taille": (icloud2 / receipt).stat().st_size,
+                     "garde": {"racine": "icloud", "chemin": "10 Identité & Banque/Identité/Absent.txt"}, "cree_le": time.time()}]
+(data2 / "plan.json").write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+p = rrun("--apply")
+done = json.loads((data2 / "results.json").read_text(encoding="utf-8"))["appliques"]
+trash = sorted(f.name for f in (home / ".Trash").iterdir()) if (home / ".Trash").exists() else []
+check("Mac: the review's archives moved into iCloud's archive, at the same path", p.returncode == 0
+      and (icloud2 / "90 Archives/10 Identité & Banque/Identité/2015-06-01 Préfecture - Carte d'identité.txt").exists()
+      and len(list((icloud2 / "90 Archives/50 Travail/Factures 2019").iterdir())) == 12 and not (ident / "2015-06-01 Préfecture - Carte d'identité.txt").exists())
+check("Mac: the review's deletions in the Trash, what is kept still there", trash == sorted(["2024-05-02 Préfecture - Carte d'identité (2).txt", "CGV Boutique.txt",
+                                                                                            "CNI recto flou.jpg", "Permis B.jpg", "Pré-demande ANTS.txt"])
+      and all((ident / x).exists() for x in ("2024-05-02 Préfecture - Carte d'identité.txt", "CNI recto.jpg", "Permis A.jpg", "Récépissé.txt")))
+check("Mac: a folder left empty goes (Ancien bail), a theme's first sub-folders stay even empty (Factures 2019, Logement)",
+      not bail.exists() and factures.is_dir() and (icloud2 / "20 Administratif" / "Logement").is_dir())
+check("Mac: refuses a review action out of a theme folder, or archiving anywhere but the archive",
+      done["bad-source"] == "erreur : ValueError source hors des dossiers par thèmes" and done["bad-target"] == "erreur : ValueError destination hors des archives"
+      and (icloud2 / kept_one).exists() and not (icloud2 / "30 Santé" / "x.txt").exists())
+check("Mac: refuses the photos, and a copy whose kept one is no longer there", (icloud2 / photo).exists() and (icloud2 / receipt).exists()
+      and done["bad-photos"] == "erreur : ValueError source dans un dossier que la relecture ne touche pas"
+      and done["kept-gone"] == "erreur : ValueError l'exemplaire gardé à sa place n'est plus là")
+n = len(revents())
+p = rrun("--decide", FILE_SORTER_CLEANUP="on")
+new = revents()[n:]
+check("review, on: what the Mac did comes back, « archivé par le Mac » and « supprimé par le Mac », with the reason",
+      by(new, "archivé par le Mac", "2018-07-01 Agence - Bail.txt")["to"] == "iCloud/90 Archives/20 Administratif/Logement/Ancien bail" and by(new, "supprimé par le Mac", "CGV Boutique.txt")["detail"] == "conditions générales de vente sans intérêt"
+      and sum(x["action"] == "archivé par le Mac" for x in new) == 14 and sum(x["action"] == "supprimé par le Mac" for x in new) == 5)
+st = rstate()
+check("review, on: nothing left waiting in review.json", not [e for e in st["files"].values() if e.get("state") == "pending"])
+
+# a new document in a small folder: read again with the others; the models out of reach: the review waits an hour, the inboxes do not
+write(ident / "Carte identité scan.txt", "Carte nationale d'identité délivrée le 02/05/2024, scan. ")
+os.utime(ident / "Carte identité scan.txt", (old, old))
+st["rest_until"] = 0
+(data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+Local.down = True
+Local.asked.clear()
+n = len(revents())
+p = rrun("--decide", FILE_SORTER_CLEANUP="on", FAKE_CLAUDE_FAIL="1")
+Local.down = False
+check("review: the models out of reach, the review waits an hour, the step says why without a file name, the pass goes through", p.returncode == 0
+      and rreport()["steps"]["decide"] == "failed: relecture des dossiers en pause une heure : limite d'usage de Claude atteinte, reprise vers 21:30"
+      and rstate()["pause_until"] > time.time() + 3000 and not [x for x in revents()[n:] if x["action"] in ("revu", "échec")]
+      and [(e["state"], e["tries"]) for k, e in rstate()["files"].items() if "Carte identité scan" in k] == [("unanswered", 0)])   # no fault of its own
+claude_asked()
+p = rrun("--decide", FILE_SORTER_CLEANUP="on")
+check("review: paused, no question at all", p.returncode == 0 and not Local.asked and not claude_asked())
+st = rstate()
+st["pause_until"] = 0   # an hour later
+for e in st["files"].values():
+    e["time"] -= 3600 if e.get("state") == "unanswered" else 0
+(data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+review_answers({**{x: ("garder", None, 0.9, "document utile") for x in kept_names},
+                "Carte identité scan.txt": ("supprimer", "2024-05-02 Préfecture - Carte d'identité.txt", 0.95, "même carte, scan moins net")})
+p = rrun("--decide", FILE_SORTER_CLEANUP="on")
+new = revents()[n:]
+check("review: a new document in a small folder is read with all the others, and a lesser copy of one of them goes",
+      p.returncode == 0 and [x["detail"] for x in new if x["action"] == "revu"] == ["7 document(s) relu(s) : 6 gardé(s), 0 archivé(s), 1 supprimé(s)"]
+      and by(new, "supprimé", "Carte identité scan.txt")["detail"].startswith("copie moins bonne de « 2024-05-02 Préfecture - Carte d'identité.txt »"))
+
+# the filing of the inboxes: the archive is not offered as a destination, and a pass with files to decide leaves the review aside
+write(icloud2 / "00 À trier" / "Ordonnance.txt", "Ordonnance du docteur Martin, 04/11/2026. ")
+answer({"Ordonnance.txt": ("30 Santé", "2026-11-04 Dr Martin - Ordonnance.txt", 0.9, "ordonnance")})
+st = rstate()
+st["rest_until"] = 0
+(data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+Local.asked.clear()
+n = len(revents())
+p = rrun("--decide", FILE_SORTER_CLEANUP="on")
+tree = Local.asked[0]["body"]["messages"][0]["content"].split("Règles :")[0] if Local.asked else ""
+check("filing: the archive is not offered as a destination; the review waits while the inboxes need the models",
+      p.returncode == 0 and "- 10 Identité & Banque/Identité" in tree and "90 Archives" not in tree and len(Local.asked) == 1
+      and not [x for x in revents()[n:] if x["action"] == "revu"])
+# iCloud's mount down (an empty folder): the review forgets nothing of iCloud and carries nothing out there
+kept_before = {k for k in rstate()["files"] if k.startswith("icloud|")}
+st = rstate()
+st["rest_until"] = 0
+st["files"]["icloud|10 Identité & Banque/Identité/Fantôme.txt|99"] = {"path": "10 Identité & Banque/Identité/Fantôme.txt", "decision": "archiver",
+                                                                     "state": "pending", "time": time.time(), "reason": "test"}
+(data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+(R / "icloud-down").mkdir()   # a mount point with nothing mounted on it
+p = rrun("--decide", FILE_SORTER_CLEANUP="on", FILE_SORTER_ICLOUD=str(R / "icloud-down"))
+st = rstate()
+check("review, iCloud's mount down: nothing forgotten, nothing carried out", p.returncode == 0 and kept_before <= set(st["files"])
+      and st["files"]["icloud|10 Identité & Banque/Identité/Fantôme.txt|99"]["state"] == "pending")
+del st["files"]["icloud|10 Identité & Banque/Identité/Fantôme.txt|99"]
+st["rest_until"] = 0   # that pass ended a walk (over the Drive alone)
+(data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+
+# FILE_SORTER_CLEANUP=off: no review at all; any value but on and off: the trial, where nothing moves
+write(achats / "Bon de commande.txt", "Bon de commande de 2019 pour un article livré. ")
+os.utime(achats / "Bon de commande.txt", (old, old))
+review_answers({"Bon de commande.txt": ("archiver", None, 0.9, "commande livrée en 2019"), "2026-10-02 Boutique - Facture.txt": ("garder", None, 0.9, "facture récente")})
+Local.asked.clear()
+claude_asked()
+n = len(revents())
+pending_mac = [a["source"]["chemin"].rsplit("/", 1)[1] for a in rplan()["actions"] if a["type"] in ("archiver", "supprimer")]
+late = next(a for a in rplan()["actions"] if a["type"] == "supprimer")
+p = rrun("--decide", FILE_SORTER_CLEANUP="off")
+check("review off: no question; what the Mac had still to do leaves its plan, « annulé » in the journal",
+      p.returncode == 0 and not Local.asked and not claude_asked() and pending_mac == ["Carte identité scan.txt"]
+      and [(x["action"], x["object"]) for x in revents()[n:]] == [("annulé", "Carte identité scan.txt")]
+      and not [a for a in rplan()["actions"] if a["type"] in ("archiver", "supprimer")])
+results = json.loads((data2 / "results.json").read_text(encoding="utf-8"))
+results["appliques"][late["id"]] = "ok"   # the Mac had fetched the plan before, and trashed it anyway
+(data2 / "results.json").write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
+n = len(revents())
+p = rrun("--decide", FILE_SORTER_CLEANUP="off")
+check("review off: what the Mac did anyway with a withdrawn action is still logged, once",
+      [(x["action"], x["object"]) for x in revents()[n:]] == [("supprimé par le Mac", "Carte identité scan.txt")] and not rstate()["withdrawn"])
+p = rrun("--decide", FILE_SORTER_CLEANUP="off")
+check("review off: and not twice", len(revents()) == n + 1)
+n = len(revents())
+p = rrun("--decide", FILE_SORTER_CLEANUP="yes")
+new = revents()[n:]
+check("review, an unknown FILE_SORTER_CLEANUP: the trial, a proposal only", p.returncode == 0 and by(new, "à archiver", "Bon de commande.txt")
+      and not by(new, "archivé", "Bon de commande.txt") and (achats / "Bon de commande.txt").exists()
+      and not [a for a in rplan()["actions"] if a["source"]["chemin"].endswith("Bon de commande.txt")])
+# names that only differ by punctuation are never taken for each other; a copy named only in its reason; a copy that names none
+billets = icloud2 / "70 Sport & Loisirs" / "Billets"
+billets.mkdir(parents=True)
+for i, name in enumerate(("Scan 1.jpg", "Scan-1.jpg", "Permis C.jpg", "Permis D.jpg", "Photo floue.jpg", "Permis E.jpg", "Permis F.jpg")):
+    (billets / name).write_bytes(b"\xff\xd8\xff\xe0 billet " + bytes([i + 10]) * 60)
+    os.utime(billets / name, (old, old))
+review_answers({"Scan 1.jpg": ("supprimer", None, 0.95, "billet périmé"), "Scan-1.jpg": ("garder", None, 0.9, "billet à venir"),
+                "Permis C.jpg": ("supprimer", None, 0.95, "copie de Permis D.jpg, moins nette"), "Permis D.jpg": ("supprimer", None, 0.95, "même permis que Permis C.jpg"),
+                "Photo floue.jpg": ("supprimer", None, 0.95, "copie floue d'un autre document"),
+                "Permis E.jpg": ("supprimer", None, 0.95, "scan flou de Permis F.jpg, inutile"), "Permis F.jpg": ("supprimer", None, 0.95, "photo ratée de Permis E.jpg, inutile")})
+rows = json.loads(answers.read_text(encoding="utf-8"))
+rows["Scan 1.jpg"]["fichier"] = "scan 1.JPG"   # the model writes it back loosely: « Scan 1.jpg » or « Scan-1.jpg »?
+answers.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+st = rstate()
+st.update(rest_until=0, pause_until=0, cursor=None)
+(data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+n = len(revents())
+p = rrun("--decide", FILE_SORTER_CLEANUP="yes")
+new = revents()[n:]
+st = rstate()["files"]
+check("review: an answer that could name two files names none; the other one keeps its own answer", p.returncode == 0
+      and st["icloud|70 Sport & Loisirs/Billets/Scan 1.jpg|" + str((billets / "Scan 1.jpg").stat().st_size)]["state"] == "unanswered"
+      and st["icloud|70 Sport & Loisirs/Billets/Scan-1.jpg|" + str((billets / "Scan-1.jpg").stat().st_size)]["decision"] == "garder")
+check("review: copies named only in their reasons, one stays, copy wording or not; a copy that names nothing stays",
+      [x["object"] for x in new if x["action"] == "à supprimer"] == ["Permis D.jpg", "Permis F.jpg"]
+      and by(new, "à supprimer", "Permis D.jpg")["detail"] == "essai, rien n'a bougé : copie moins bonne de « Permis C.jpg » : même permis que Permis C.jpg")
+
+(billets / "Billet concert.jpg").write_bytes(b"\xff\xd8\xff\xe0 concert " + bytes([30]) * 60)   # a new document: the small folder read again whole
+os.utime(billets / "Billet concert.jpg", (old, old))
+rows["Billet concert.jpg"] = {"raison": "concert à venir", "decision": "garder", "doublon_de": None, "confiance": 0.9}
+answers.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+st = rstate()
+st.update(rest_until=0, cursor=None)
+(data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+claude_asked()
+n = len(revents())
+p = rrun("--decide", FILE_SORTER_CLEANUP="yes")
+new = revents()[n:]
+check("review, trial: a folder read again for a new document does not repeat a proposal already in the journal", p.returncode == 0
+      and [x["action"] for x in new] == ["revu"] and "Permis D.jpg" in claude_asked()[0])
+
+matchs = icloud2 / "70 Sport & Loisirs" / "Matchs"
+matchs.mkdir(parents=True)
+for i, name in enumerate(("Bad.jpg", "Good.jpg")):
+    (matchs / name).write_bytes(b"\xff\xd8\xff\xe0 match " + bytes([i + 40]) * 60)
+    os.utime(matchs / name, (old, old))
+rows = {"Good.jpg": {"raison": "billet du prochain match", "decision": "garder", "doublon_de": None, "confiance": 0.9}}
+answers.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+
+
+def later_pass(hours):
+    """A pass of the review some hours after the last one (its pause over, its documents without an answer due again)."""
+    st = rstate()
+    st.update(rest_until=0, pause_until=0, cursor=None)
+    for e in st["files"].values():
+        if e["path"].startswith("70 Sport & Loisirs/Matchs/") and e.get("state") == "unanswered":
+            e["time"] -= hours * 3600
+    (data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    claude_asked()
+    p = rrun("--decide", FILE_SORTER_CLEANUP="yes", FAKE_CLAUDE_FAIL_ON="Bad.jpg")
+    return p, claude_asked()
+
+
+tries = lambda name: next((e.get("state"), e.get("tries"), e.get("decision")) for e in rstate()["files"].values() if e["path"].endswith("/" + name))
+asked = [later_pass(h)[1] for h in (0, 1, 24, 24)]
+check("review: a document Claude always refuses is asked alone after two tries, and the one asked with it is read at last",
+      asked == [[["Bad.jpg", "Good.jpg"]], [["Bad.jpg", "Good.jpg"]], [["Bad.jpg"]], [["Good.jpg"]]]
+      and tries("Bad.jpg") == ("unanswered", 3, None) and tries("Good.jpg")[0] == "kept")
+
+(data2 / "review.json").write_text("[1, 2]", encoding="utf-8")   # a broken state: the review starts again, the inboxes go on
+write(icloud2 / "00 À trier" / "Lettre.txt", "Lettre de la mairie, 05/11/2026. ")
+answer({"Lettre.txt": ("20 Administratif/Logement", "2026-11-05 Mairie - Lettre.txt", 0.9, "lettre")})
+p = rrun("--decide", FILE_SORTER_CLEANUP="on")
+check("review: a broken review.json never stops the pass: the inboxes are filed, the state starts again", p.returncode == 0
+      and "review.json unreadable" in p.stdout and isinstance(rstate(), dict)
+      and any(a["source"]["chemin"] == "00 À trier/Lettre.txt" for a in rplan()["actions"]))
+check("review: no file left behind by the atomic writes", not list(data2.glob("*.tmp")) and not list(data2.glob(".*.tmp")))
 shutil.rmtree(T)
 LOCAL.shutdown()
 
