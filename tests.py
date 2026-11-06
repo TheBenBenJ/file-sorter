@@ -817,6 +817,33 @@ new = revents()[n:]
 check("review, trial: a folder read again for a new document does not repeat a proposal already in the journal", p.returncode == 0
       and [x["action"] for x in new] == ["revu"] and "Permis D.jpg" in claude_asked()[0])
 
+# a folder of more than ten documents, ten or fewer once those going to the archive are set aside: a new one is read with those that stay
+cartes = icloud2 / "70 Sport & Loisirs" / "Cartes"
+cartes.mkdir(parents=True)
+olds, keeps = [f"Ancienne carte {i}.txt" for i in range(6)], [f"Carte {c}.txt" for c in "ABCDE"]
+for name in olds + keeps:
+    write(cartes / name, f"Carte de membre du club, {name}, saison passée ou en cours. ")
+    os.utime(cartes / name, (old, old))
+review_answers({**{x: ("archiver", None, 0.9, "carte d'une saison passée") for x in olds}, **{x: ("garder", None, 0.9, "carte en cours") for x in keeps},
+                "Nouvelle carte.txt": ("garder", None, 0.9, "nouvelle carte")})
+st = rstate()
+st.update(rest_until=0, pause_until=0, cursor=None)
+(data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+for _ in range(2):   # eleven documents: ten, then one
+    p = rrun("--decide", FILE_SORTER_CLEANUP="yes")
+write(cartes / "Nouvelle carte.txt", "Nouvelle carte de membre du club, saison 2026. ")
+os.utime(cartes / "Nouvelle carte.txt", (old, old))
+st = rstate()
+st.update(rest_until=0, pause_until=0, cursor=None)
+(data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+Local.asked.clear()
+p = rrun("--decide", FILE_SORTER_CLEANUP="yes")
+asked = {n for x in Local.asked for n in x["names"]}
+content = "".join(x["body"]["messages"][0]["content"] for x in Local.asked)
+check("review: a new document read with those that stay, the folder whole once those going to the archive are set aside, these not listed",
+      p.returncode == 0 and asked == set(keeps) | {"Nouvelle carte.txt"} and "- Carte A.txt" in content and "Ancienne carte" not in content
+      and sum(e.get("state") == "pending" for k, e in rstate()["files"].items() if "/Cartes/" in k) == 6)
+
 matchs = icloud2 / "70 Sport & Loisirs" / "Matchs"
 matchs.mkdir(parents=True)
 for i, name in enumerate(("Bad.jpg", "Good.jpg")):

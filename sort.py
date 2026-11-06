@@ -1293,8 +1293,10 @@ class Review:
     def folder(self, root, base, r, rel, names):
         """A folder's documents to read: (the documents it keeps, to list in the question, those old enough to be read, both sorted, their
         keys, the ones to ask about, all read after them) or None. Its documents are read together when they are REVIEW_FILES or fewer, so
-        that a new copy meets the former ones; never one already archived or trashed (the mount shows it a few minutes more) nor one whose
-        action waits for the Mac."""
+        that a new copy meets the former ones; never one already archived or trashed (the mount shows it a few minutes more), one whose
+        action waits for the Mac, nor one the review already sends to the archive (a proposal of the trial, a decision waiting) unless new
+        rules ask it again: the folder is asked about as it will be, so that a new identity card meets the copies that stay, not those already
+        archived (06/11/2026). One going to the trash stays in the question: of two copies, one must remain, and the model must see both."""
         if self.index is None:
             self.index = {}
             for k, e in self.files.items():
@@ -1311,7 +1313,9 @@ class Review:
             if not stat.S_ISREG(st.st_mode):
                 continue
             keys[p] = key = f"{root}|{nfc(os.path.relpath(p, base))}|{st.st_size}"
-            if self.files.get(key, {}).get("state") == "done" or f"{root}|{nfc(os.path.relpath(p, base))}" in self.planned:
+            e = self.files.get(key) or {}
+            leaving = e.get("state") == "pending" and e.get("decision") == "archiver" and not self.due(key)   # into the archive: nothing lost
+            if e.get("state") == "done" or leaving or f"{root}|{nfc(os.path.relpath(p, base))}" in self.planned:
                 continue
             listed.append(p)
             if self.now - st.st_mtime >= REVIEW_MIN_AGE:   # its modification only: a document filed keeps its date, an edited one gets a new one
