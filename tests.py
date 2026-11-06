@@ -506,9 +506,11 @@ check("review, trial: one folder a pass, a big one in two (10, then 2), each in 
       and [x["detail"].split(" :")[0] for x in ev if x["object"] == "iCloud/50 Travail/Factures 2019"] == ["10 document(s) relu(s)", "2 document(s) relu(s)"])
 check("review, trial: a big folder's question lists its files around those asked", all(tokens + reserve + 256 <= 16384 for tokens, reserve in
       [(x["tokens"], x["max_tokens"]) for x in Local.asked]) and any("2019-12-28 EDF - Facture.txt (1 Ko)" in x["body"]["messages"][0]["content"] for x in Local.asked))
-e = by(ev, "à supprimer", "Conditions générales.txt")
-check("review, trial: in the Drive too, the terms of use « à supprimer » to the Drive's trash, the old contract « à archiver »",
-      e and e["from"] == "Google Drive/50 Travail/Contrats" and e["to"] == "corbeille du Drive"
+e = by(ev, "à archiver", "Conditions générales.txt")
+check("review, trial: nothing of the Drive to the trash: its terms of use « à archiver », saying why, like the old contract",
+      e and e["from"] == "Google Drive/50 Travail/Contrats" and e["to"] == "Google Drive/90 Archives/50 Travail/Contrats"
+      and e["detail"] == "essai, rien n'a bougé : conditions d'utilisation génériques ; à l'archive plutôt qu'à la corbeille : rien n'est supprimé dans le Drive"
+      and not by(ev, "à supprimer", "Conditions générales.txt") and not [x for x in ev if x["action"] == "à supprimer" and x["from"].startswith("Google Drive")]
       and by(ev, "à archiver", "2019-01-01 Ancien employeur - Contrat.txt")["to"] == "Google Drive/90 Archives/50 Travail/Contrats")
 asked_names = {n for x in Local.asked for n in x["names"]} | {n for x in claude_asked() for n in x}
 check("review: never the photos, the archive, a folder not numbered, the root, a code project, the inboxes, nor a file of the last two days",
@@ -517,13 +519,82 @@ check("review: a document of the last two days is listed to the model with the o
       any("- Nouveau.txt (1 Ko)" in x["body"]["messages"][0]["content"] for x in Local.asked))
 notified = (T / "notified.txt").read_text(encoding="utf-8").splitlines() if (T / "notified.txt").exists() else []
 check("review, trial: the end of the first walk notified once, counts only, no file name",
-      notified == ["Tri des fichiers Relecture d'essai des dossiers terminée : 28 documents relus, 15 à archiver et 6 à supprimer proposés, rien n'a bougé. "
+      notified == ["Tri des fichiers Relecture d'essai des dossiers terminée : 28 documents relus, 16 à archiver et 5 à supprimer proposés, rien n'a bougé. "
                    "Le détail est dans le journal d'activité"])
 n = len(revents())
 Local.asked.clear()
 p = rrun("--decide")
 check("review: once every folder is read, the next walk waits an hour: no question, no event", p.returncode == 0 and not Local.asked
       and not claude_asked() and len(revents()) == n)
+
+
+# the bilan: what review.json holds, folder by folder, in the unit's journal, once per REVIEW_BILAN (the coding agents cannot open it)
+def bilan(out):
+    """The BILAN lines of a pass: {(root, folder): {name: [code, …]}}, the parts (i, n, characters of JSON) and the totals."""
+    found, parts = {}, []
+    for i, total, js in re.findall(r"BILAN   (\d+)/(\d+) (.+)$", out, re.M):
+        parts.append((int(i), int(total), len(js)))
+        for piece in json.loads(js):
+            found.setdefault((piece["r"], piece["f"]), {}).update({d[0]: d[1:] for d in piece["d"]})
+    end = re.search(r"BILAN   end: (.+)$", out, re.M)
+    return found, parts, end and end.group(1)
+
+
+def bilan_again(**env):
+    st = rstate()
+    st.pop("bilan", None)
+    (data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    return rrun("--decide", **env)
+
+
+p = rrun("--decide")
+check("bilan: logged at the review's first pass, not again at the next ones", p.returncode == 0 and "BILAN" not in p.stdout
+      and rstate().get("bilan") == "2026-11-06")
+n = len(revents())
+p = bilan_again()
+found, parts, end = bilan(p.stdout)
+idf, ctr = found.get(("icloud", "10 Identité & Banque/Identité"), {}), found.get(("drive", "50 Travail/Contrats"), {})
+check("bilan: each document of the theme folders with what becomes of it, from review.json, no model asked, nothing in the journal",
+      p.returncode == 0 and not Local.asked and not claude_asked() and len(revents()) == n and [x[:2] for x in parts] == [(1, 1)]
+      and idf.get("2015-06-01 Préfecture - Carte d'identité.txt") == ["a", 0.92, "carte expirée en 2025, remplacée par celle de 2024"]
+      and idf.get("Pré-demande ANTS.txt") == ["s", 0.95, "pré-demande dont le rendez-vous est passé"]
+      and idf.get("2024-05-02 Préfecture - Carte d'identité (2).txt") == ["s", 1.0, "copie identique de « 2024-05-02 Préfecture - Carte d'identité.txt »"]
+      and idf.get("CNI recto flou.jpg") == ["s", 0.95, "copie moins bonne de « CNI recto.jpg » : même carte, plus floue"]
+      and idf.get("CNI recto.jpg") == ["g", 0.9] and idf.get("Récépissé.txt") == ["g", 0.6, "archiver", "récépissé ancien"]
+      and idf.get("Carte identité photo.jpg") == ["g", 0.95, "supprimer", "photo de la carte"]
+      and ctr.get("Conditions générales.txt") == ["a", 0.95, "conditions d'utilisation génériques ; à l'archive plutôt qu'à la corbeille : rien n'est supprimé dans le Drive"]
+      and found.get(("icloud", "60 Achats/Commandes"), {}).get("Nouveau.txt") == ["n"]
+      or print(p.stdout[-3000:]))
+check("bilan: never the photos, the archive, the root, a code project nor the inboxes; the totals in one line",
+      not {name for docs in found.values() for name in docs} & set(never)
+      and end == "29 document(s), 7 kept, 16 to archive, 5 to trash, 1 not read yet (FILE_SORTER_CLEANUP=trial)")
+source = (code / "sort.py").read_text(encoding="utf-8")
+try:   # short lines: a folder goes on in the next one
+    (code / "sort.py").write_text(source.replace("REVIEW_BILAN_LINE = 16000", "REVIEW_BILAN_LINE = 500"), encoding="utf-8")
+    p = bilan_again()
+finally:
+    (code / "sort.py").write_text(source, encoding="utf-8")
+split, parts, end2 = bilan(p.stdout)
+check("bilan: past its length a line goes on in the next one, a folder split too, each part numbered; the same bilan put together",
+      p.returncode == 0 and split == found and end2 == end and len(parts) > 4 and all(x[2] <= 510 for x in parts)
+      and [x[:2] for x in parts] == [(i, len(parts)) for i in range(1, len(parts) + 1)]
+      and sum('"f":"50 Travail/Factures 2019"' in line for line in p.stdout.splitlines() if "BILAN" in line) > 1)
+
+# what the trial proposed to trash in the Drive before the owner's rule of 06/11/2026 goes into its archive instead, said once
+st = rstate()
+key = next(k for k, e in st["files"].items() if e["path"].endswith("Conditions générales.txt"))
+st["files"][key].update(decision="supprimer", proposal="supprimer")
+(data2 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+n = len(revents())
+p = rrun("--decide")
+e = rstate()["files"][key]
+check("Drive: a trial's proposal to trash there becomes one to archive, a « revu » says so, the model's decision kept",
+      p.returncode == 0 and (e["decision"], e["proposal"], e["state"]) == ("archiver", "supprimer", "pending")
+      and [(x["action"], x["object"], x["detail"]) for x in revents()[n:]]
+      == [("revu", "Google Drive", "1 document(s) proposé(s) pour la corbeille partent plutôt aux archives : rien n'est supprimé dans le Drive")])
+p = rrun("--decide")
+check("Drive: said once", p.returncode == 0 and len(revents()) == n + 1)
+n = len(revents())
 
 # the trial lifted: the trial's decisions carried out, the Drive's by the server, iCloud's by the Mac
 p = rrun("--decide", FILE_SORTER_CLEANUP="on")
@@ -532,9 +603,11 @@ e = by(new, "archivé", "2019-01-01 Ancien employeur - Contrat.txt")
 check("review, on: the server archives in the Drive, at the same path under 90 Archives", e and e["to"] == "Google Drive/90 Archives/50 Travail/Contrats"
       and e["detail"] == "contrat terminé en 2022 ; archivé par le serveur dans le Drive" and (drive2 / "90 Archives/50 Travail/Contrats/2019-01-01 Ancien employeur - Contrat.txt").exists()
       and not (contrats / "2019-01-01 Ancien employeur - Contrat.txt").exists())
-e = by(new, "supprimé", "Conditions générales.txt")
-check("review, on: the server sends the terms of use to the Drive's trash", e and e["to"] == "corbeille du Drive" and not (contrats / "Conditions générales.txt").exists()
-      and (contrats / "2026-01-01 Client - Contrat.txt").exists())
+e = by(new, "archivé", "Conditions générales.txt")
+check("review, on: the server archives the Drive's terms of use, never into its trash", e and e["to"] == "Google Drive/90 Archives/50 Travail/Contrats"
+      and e["detail"] == "conditions d'utilisation génériques ; à l'archive plutôt qu'à la corbeille : rien n'est supprimé dans le Drive ; archivé par le serveur dans le Drive"
+      and (drive2 / "90 Archives/50 Travail/Contrats/Conditions générales.txt").exists() and not (contrats / "Conditions générales.txt").exists()
+      and not by(new, "supprimé", "Conditions générales.txt") and (contrats / "2026-01-01 Client - Contrat.txt").exists())
 kinds = sorted((a["type"], a["source"]["chemin"].rsplit("/", 1)[1]) for a in rplan()["actions"])
 check("review, on: iCloud's decisions go into the Mac's plan (archiver, supprimer), all applied at once (21 at most 40)", len(kinds) == 19 and
       [k for k in kinds if k[0] == "supprimer"] == [("supprimer", n) for n in sorted(["2024-05-02 Préfecture - Carte d'identité (2).txt", "CGV Boutique.txt",
@@ -583,7 +656,9 @@ plan["actions"] += [{**plan["actions"][0], "id": "bad-source", "source": {"racin
                     {"id": "bad-photos", "type": "supprimer", "source": {"racine": "icloud", "chemin": photo}, "taille": (icloud2 / photo).stat().st_size,
                      "cree_le": time.time()},
                     {"id": "kept-gone", "type": "supprimer", "source": {"racine": "icloud", "chemin": receipt}, "taille": (icloud2 / receipt).stat().st_size,
-                     "garde": {"racine": "icloud", "chemin": "10 Identité & Banque/Identité/Absent.txt"}, "cree_le": time.time()}]
+                     "garde": {"racine": "icloud", "chemin": "10 Identité & Banque/Identité/Absent.txt"}, "cree_le": time.time()},
+                    {"id": "drive-trash", "type": "supprimer", "source": {"racine": "drive", "chemin": "50 Travail/Contrats/2026-01-01 Client - Contrat.txt"},
+                     "taille": (contrats / "2026-01-01 Client - Contrat.txt").stat().st_size, "cree_le": time.time()}]
 (data2 / "plan.json").write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
 p = rrun("--apply")
 done = json.loads((data2 / "results.json").read_text(encoding="utf-8"))["appliques"]
@@ -602,6 +677,8 @@ check("Mac: refuses a review action out of a theme folder, or archiving anywhere
 check("Mac: refuses the photos, and a copy whose kept one is no longer there", (icloud2 / photo).exists() and (icloud2 / receipt).exists()
       and done["bad-photos"] == "erreur : ValueError source dans un dossier que la relecture ne touche pas"
       and done["kept-gone"] == "erreur : ValueError l'exemplaire gardé à sa place n'est plus là")
+check("Mac: never the Drive's trash, even when a plan asks for it", done["drive-trash"] == "erreur : ValueError rien n'est mis à la corbeille dans le Drive"
+      and (contrats / "2026-01-01 Client - Contrat.txt").exists())
 n = len(revents())
 p = rrun("--decide", FILE_SORTER_CLEANUP="on")
 new = revents()[n:]
