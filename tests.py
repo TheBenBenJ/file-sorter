@@ -932,7 +932,7 @@ claude_asked()
 p = run("--decide", **nenv)
 ev = nevents()
 check("rules: under new rules, a folder where a document stayed for lack of certainty is read again whole at once, the walk starting over",
-      p.returncode == 0 and "review: new rules, 1 folder(s) read again (3 document(s))" in p.stdout and nstate()["rules"] == 5
+      p.returncode == 0 and "review: new rules, 1 folder(s) read again (3 document(s))" in p.stdout and nstate()["rules"] == 6
       and [sorted(x["names"]) for x in Local.asked] == [sorted(["2013-11-27 Banque - RIB.txt", "2024-01-10 Banque - RIB.txt", "2019-01-07 Banque - Relevé.txt"])]
       or print(p.stdout[-3000:], p.stderr[-3000:]))
 check("rules: a lesser copy wanted in the trash at 0.75 goes to the archive, saying why; a proposal already in the journal is not repeated",
@@ -1005,7 +1005,7 @@ asked = {n for x in Local.asked for n in x["names"]}
 oev = [json.loads(x) for x in (data5 / "activity.jsonl").read_text(encoding="utf-8").splitlines()] if (data5 / "activity.jsonl").exists() else []
 check("rules of 06/11: every document a model decided is asked again at once, what leaves included, the walk starting over; not what cannot be read",
       p.returncode == 0 and "review: new rules, 3 folder(s) read again (6 document(s))" in p.stdout
-      and json.loads((data5 / "review.json").read_text(encoding="utf-8"))["rules"] == 5
+      and json.loads((data5 / "review.json").read_text(encoding="utf-8"))["rules"] == 6
       and asked == {"Offre de prêt immobilier.txt", "Ancien permis.txt", "La Poste - Avis de réception recommandé.txt", "France Stage Permis - Reçu de paiement.txt",
                     "Préfecture - Reconstitution de points.txt", "Cora - Ticket de caisse.txt"}
       or print(p.stdout[-3000:], p.stderr[-2000:]))
@@ -1025,9 +1025,9 @@ check("rules of 06/11: the question keeps only official documents still current,
       and "Un reçu, une confirmation, un accusé ou un avis de réception, une preuve de dépôt ou un suivi n'est pas un document officiel" in sent
       and "restent en cours tant que la liste ne montre pas leur fin" in sent and "Une démarche aboutie ne garde que son résultat" in sent
       and "Un extrait d'acte et le livret de famille sont deux documents différents" in sent
-      and "Il n'a qu'un logement à lui : un projet d'achat immobilier dont la liste ne montre pas l'acte de vente où il est acheteur n'a pas abouti" in sent)
+      and "Il n'a qu'un logement à lui" not in sent and "projet d'achat" not in sent)
 
-# later the same day: a purchase that did not go through keeps nothing; from rules 4, only the folders of a purchase are read again
+# later the same day: the rule on purchases without their deed, given and withdrawn; from rules 4 or 5, only the folders of a purchase are read again
 projet5, sante5 = icloud5 / "20 Administratif" / "Logement" / "Projet abandonné", icloud5 / "30 Santé" / "Suivi"
 for d in (projet5, sante5):
     d.mkdir(parents=True, exist_ok=True)
@@ -1044,7 +1044,7 @@ review_answers({"Offre d'achat appartement.txt": ("supprimer", None, 0.95, "proj
                 "Plans du lot.txt": ("supprimer", None, 0.95, "plans d'un bien jamais acheté")})
 Local.asked.clear()
 p = run("--decide", FILE_SORTER_REVIEW_PASS="30", FILE_SORTER_ICLOUD=str(icloud5), FILE_SORTER_DRIVE=str(drive5), FILE_SORTER_DATA=str(data5), FAKE_DRIVE=str(drive5))
-check("rules of 06/11, later: from rules 4, only the folders of a purchase are read again whole, the others keep their decisions",
+check("rules of 06/11, later: from rules 4 or 5, only the folders of a purchase are read again whole, the others keep their decisions",
       p.returncode == 0 and "review: new rules, 2 folder(s) read again (3 document(s))" in p.stdout
       and {n for x in Local.asked for n in x["names"]} == {"Offre d'achat appartement.txt", "Plans du lot.txt", "Offre de prêt immobilier.txt"}
       or print(p.stdout[-2500:]))
