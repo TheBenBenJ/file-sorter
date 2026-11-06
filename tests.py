@@ -932,7 +932,7 @@ claude_asked()
 p = run("--decide", **nenv)
 ev = nevents()
 check("rules: under new rules, a folder where a document stayed for lack of certainty is read again whole at once, the walk starting over",
-      p.returncode == 0 and "review: new rules, 1 folder(s) read again (3 document(s))" in p.stdout and nstate()["rules"] == 4
+      p.returncode == 0 and "review: new rules, 1 folder(s) read again (3 document(s))" in p.stdout and nstate()["rules"] == 5
       and [sorted(x["names"]) for x in Local.asked] == [sorted(["2013-11-27 Banque - RIB.txt", "2024-01-10 Banque - RIB.txt", "2019-01-07 Banque - Relevé.txt"])]
       or print(p.stdout[-3000:], p.stderr[-3000:]))
 check("rules: a lesser copy wanted in the trash at 0.75 goes to the archive, saying why; a proposal already in the journal is not repeated",
@@ -1005,7 +1005,7 @@ asked = {n for x in Local.asked for n in x["names"]}
 oev = [json.loads(x) for x in (data5 / "activity.jsonl").read_text(encoding="utf-8").splitlines()] if (data5 / "activity.jsonl").exists() else []
 check("rules of 06/11: every document a model decided is asked again at once, what leaves included, the walk starting over; not what cannot be read",
       p.returncode == 0 and "review: new rules, 3 folder(s) read again (6 document(s))" in p.stdout
-      and json.loads((data5 / "review.json").read_text(encoding="utf-8"))["rules"] == 4
+      and json.loads((data5 / "review.json").read_text(encoding="utf-8"))["rules"] == 5
       and asked == {"Offre de prêt immobilier.txt", "Ancien permis.txt", "La Poste - Avis de réception recommandé.txt", "France Stage Permis - Reçu de paiement.txt",
                     "Préfecture - Reconstitution de points.txt", "Cora - Ticket de caisse.txt"}
       or print(p.stdout[-3000:], p.stderr[-2000:]))
@@ -1024,7 +1024,30 @@ check("rules of 06/11: the question keeps only official documents still current,
       '"garder" : SEULEMENT un document officiel encore d\'actualité' in sent and 'Dans le doute entre "garder" et "archiver" : archiver' in sent
       and "Un reçu, une confirmation, un accusé ou un avis de réception, une preuve de dépôt ou un suivi n'est pas un document officiel" in sent
       and "restent en cours tant que la liste ne montre pas leur fin" in sent and "Une démarche aboutie ne garde que son résultat" in sent
-      and "Un extrait d'acte et le livret de famille sont deux documents différents" in sent)
+      and "Un extrait d'acte et le livret de famille sont deux documents différents" in sent
+      and "Il n'a qu'un logement à lui : un projet d'achat immobilier dont la liste ne montre pas l'acte de vente où il est acheteur n'a pas abouti" in sent)
+
+# later the same day: a purchase that did not go through keeps nothing; from rules 4, only the folders of a purchase are read again
+projet5, sante5 = icloud5 / "20 Administratif" / "Logement" / "Projet abandonné", icloud5 / "30 Santé" / "Suivi"
+for d in (projet5, sante5):
+    d.mkdir(parents=True, exist_ok=True)
+docs6 = {projet5 / "Offre d'achat appartement.txt": ("garder", 0.95, "kept", "local"), projet5 / "Plans du lot.txt": ("garder", 0.95, "kept", "local"),
+         sante5 / "Compte rendu médical.txt": ("garder", 0.95, "kept", "local")}
+for f in docs6:
+    write(f, f"Document {f.stem}, à relire. ")
+    os.utime(f, (old, old))
+st = json.loads((data5 / "review.json").read_text(encoding="utf-8"))
+st["files"].update({f"icloud|{f.relative_to(icloud5)}|{f.stat().st_size}": entry5(f, *v) for f, v in docs6.items()})
+st.update(rules=4, rest_until=time.time() + 3600)
+(data5 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+review_answers({"Offre d'achat appartement.txt": ("supprimer", None, 0.95, "projet d'achat sans acte de vente, abandonné"),
+                "Plans du lot.txt": ("supprimer", None, 0.95, "plans d'un bien jamais acheté")})
+Local.asked.clear()
+p = run("--decide", FILE_SORTER_REVIEW_PASS="30", FILE_SORTER_ICLOUD=str(icloud5), FILE_SORTER_DRIVE=str(drive5), FILE_SORTER_DATA=str(data5), FAKE_DRIVE=str(drive5))
+check("rules of 06/11, later: from rules 4, only the folders of a purchase are read again whole, the others keep their decisions",
+      p.returncode == 0 and "review: new rules, 2 folder(s) read again (3 document(s))" in p.stdout
+      and {n for x in Local.asked for n in x["names"]} == {"Offre d'achat appartement.txt", "Plans du lot.txt", "Offre de prêt immobilier.txt"}
+      or print(p.stdout[-2500:]))
 
 # ---- what the iPhone saves into the Drive without a folder: Chrome's « Enregistré depuis Chrome » and the Drive's root, sorted too ----
 C = T / "chrome"

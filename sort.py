@@ -121,7 +121,7 @@ DECISIONS = ("garder", "archiver", "supprimer")
 REVIEW_LEAVE, REVIEW_TRASH = 0.7, 0.9
 # Nothing of the Drive goes to the trash (the owner's rule of 06/11/2026): what the review would trash there goes into its archive instead.
 REVIEW_NO_TRASH = ("drive",)
-REVIEW_RULES = 4            # the version of these rules in review.json: a document left in place by former ones is asked again
+REVIEW_RULES = 5            # the version of these rules in review.json: a document left in place by former ones is asked again
 # The review's state, folder by folder, in the unit's journal (BILAN lines), once per value: how the coding agents, who cannot open
 # review.json, read what it holds. A new value logs it again at the next pass.
 REVIEW_BILAN = "2026-11-06"
@@ -999,6 +999,7 @@ Pour chaque fichier examiné plus bas, "decision" vaut :
 - "supprimer" (corbeille) : ce qui n'est pas un document officiel et ne sert plus : reçu de paiement, ticket de caisse, bon de retrait, confirmation de commande, de souscription, d'inscription ou de réservation, preuve de dépôt, avis de réception ou suivi d'un recommandé ou d'un colis, accusé de réception, billet ou événement passé, devis non signé, test Covid, publicité, newsletter, conditions générales (de vente, d'utilisation), notice, mentions légales, politique de confidentialité, document générique qui ne le concerne pas personnellement, formulaire vierge, capture d'écran, brouillon, code, QR code, pré-demande, convocation ou rendez-vous passés ; ou copie moins bonne d'un autre fichier examiné plus bas (le même document : scan plus flou, photo d'un document déjà scanné, version incomplète).
 - Un reçu, une confirmation, un accusé ou un avis de réception, une preuve de dépôt ou un suivi n'est pas un document officiel, même quand il vient d'une administration ou concerne un contrat en cours : "supprimer".
 - Un contrat signé (prêt, bail, assurance, mutuelle, abonnement, travail) et le logement qu'il concerne restent en cours tant que la liste ne montre pas leur fin (résiliation, vente où il est vendeur, état des lieux de sortie, dernier remboursement, contrat plus récent qui le remplace) : sans cette preuve, "garder". Un prêt immobilier court jusqu'à sa dernière échéance.
+- Il n'a qu'un logement à lui : un projet d'achat immobilier dont la liste ne montre pas l'acte de vente où il est acheteur n'a pas abouti. Ses pièces ne servent plus : offre d'achat, lettre d'intention, simulation, accord de principe ou mandat de recherche de financement, annonce, plans, diagnostics, règlement et procès-verbaux de copropriété reçus pour ce bien : "supprimer" (une promesse ou un compromis signés : "archiver"). Une offre de prêt immobilier acceptée, elle, montre que l'achat a abouti : elle reste en cours.
 - Une démarche aboutie ne garde que son résultat : quand le document obtenu est dans la liste (nouvelle carte, nouveau titre, contrat signé), les pièces qui ont servi à l'obtenir ne servent plus : pré-demande, récépissé, timbre fiscal, convocation, attestation de stage ou de présence, formulaire, devis, déclaration de perte ou de vol, accusé de réception : "supprimer". Le résultat, lui, reste : le titre, la carte, et toute décision ou lettre d'une administration (retrait ou retour de points, suspension, avis) se garde ou s'archive, jamais à la corbeille. Un timbre fiscal de plus d'un an ne sert plus.
 - Jamais "supprimer" une pièce d'identité, un acte d'état civil (extrait d'acte de naissance, livret de famille), un diplôme, un contrat signé, une décision d'une administration ou d'un tribunal, un bulletin de paie, un avis d'impôt, ni une facture ou un justificatif de l'auto-entreprise, sauf une copie moins bonne du même document (même pièce, même page) : archive-les plutôt. Un extrait d'acte et le livret de famille sont deux documents différents.
 - Dans le doute entre "garder" et "archiver" : archiver, rien n'y est perdu.
@@ -1169,6 +1170,13 @@ class Review:
                 # keeps only its result. Every document a model decided is asked again, what leaves included: the deed of the owner's home
                 # (2019) and his running mortgage were on their way to the archive.
                 due |= {k for k, e in state["files"].items() if e.get("engine") and e.get("state") in ("kept", "pending")}
+            if before < 5:
+                # Later the same day, the owner: « je n'ai qu'un appartement actuellement donc s'il y a des dossiers d'achat autres ils
+                # n'ont pas abouti »; a purchase that did not go through keeps nothing. The folders of a purchase (a deed, a promise, an
+                # offer, a financing, a building's papers) are read again whole.
+                buying = re.compile(r"acte de vente|promesse|compromis|offre d'achat|lettre d'intention|financement|prêt immobilier|copropriété|diagnostic", re.I)
+                places = {where(k, e) for k, e in state["files"].items() if buying.search(nfc(os.path.basename(e["path"])))}
+                due |= {k for k, e in state["files"].items() if where(k, e) in places and e.get("engine") and e.get("state") in ("kept", "pending")}
             for k in due:
                 state["files"][k]["time"] = 0
             if due:   # their decisions stand until then (a proposal already in the journal is not logged twice); the walk starts over
