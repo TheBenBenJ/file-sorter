@@ -121,14 +121,17 @@ DECISIONS = ("garder", "archiver", "supprimer")
 REVIEW_LEAVE, REVIEW_TRASH = 0.7, 0.9
 # Nothing of the Drive goes to the trash (the owner's rule of 06/11/2026): what the review would trash there goes into its archive instead.
 REVIEW_NO_TRASH = ("drive",)
-REVIEW_RULES = 2            # the version of these rules in review.json: a document left in place by former ones is asked again
+REVIEW_RULES = 3            # the version of these rules in review.json: a document left in place by former ones is asked again
 # The review's state, folder by folder, in the unit's journal (BILAN lines), once per value: how the coding agents, who cannot open
 # review.json, read what it holds. A new value logs it again at the next pass.
 REVIEW_BILAN = "2026-11-06"
 REVIEW_BILAN_LINE = 16000   # characters of JSON per BILAN line at most (journald splits a line past 48K)
 REVIEW_EXT = OFFICE + (".pdf", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff", ".rtf", ".pages", ".numbers", ".key", ".txt")
 REVIEW_VISUAL = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif")   # without text, Claude reads these (HEIC through a JPEG)
-REVIEW_FILES = 10           # documents asked about per pass, one folder at a time; a folder of 10 or fewer is always read whole
+REVIEW_FILES = 10           # documents asked about per question, one folder at a time; a folder of 10 or fewer is always read whole
+# documents asked about per pass at most: several small folders in a row, so that a walk under new rules ends within hours (06/11/2026;
+# one folder a pass until then). FILE_SORTER_REVIEW_PASS=1 keeps one folder a pass (the tests).
+REVIEW_PASS = max(1, int(os.environ.get("FILE_SORTER_REVIEW_PASS") or 30))
 REVIEW_APPLY = 40           # decisions applied per pass at most (once the trial is lifted, the trial's own first)
 REVIEW_CHARS = 1200         # of each document's text: enough to tell what it is
 REVIEW_LISTING = 150        # names of the folder given as context, at most
@@ -977,22 +980,25 @@ PHOTOS = "80 Images"   # photos and screenshots: never reviewed (they keep their
 def review_prompt(root, folder, files, archive, blocks, local=False):
     # French on purpose, like the filing's prompt: the owner's documents, folders and rules are French. What is current, what is kept as a
     # proof and what is of no use are the owner's words (ticket 14 of 05/11/2026: temporary files, several identity cards, mail
-    # attachments, terms of sale); his rules.md comes after and may add his own.
+    # attachments, terms of sale; 06/11/2026: only official documents still current stay, « ce ne sont pas des documents officiels » of a
+    # registered letter's tracking and a course's receipt, which the former rules kept); his rules.md comes after and may add his own.
     # The same scale as before 05/11/2026 evening, so that the models' certainty means what it meant; what the script does with it (REVIEW_LEAVE,
     # REVIEW_TRASH) is not theirs to weigh.
     confidence = ('- "confiance" : ta certitude sur cette décision, de 0 (au hasard) à 1 (certain). Si tu n\'es pas sûr, mets moins de 0.8.' if local else
                   '- "confiance" entre 0 et 1. Si tu n\'es pas sûr, mets moins de 0.8.')
     return f"""Tu fais le ménage dans les documents personnels de {SETTINGS['proprietaire']}, rangés par thèmes dans son {'Google Drive' if root == 'drive' else 'iCloud Drive'}. Nous sommes le {datetime.now():%d/%m/%Y}.
-Les dossiers par thèmes ne gardent que ce qui sert encore ; le reste part dans « {archive} » (au même chemin) ou à la corbeille.
+Les dossiers par thèmes ne gardent que les documents officiels encore d'actualité. Le reste part dans « {archive} » (au même chemin) s'il peut encore servir de preuve, sinon à la corbeille.
 
 Dossier relu : « {folder} ». Tous ses fichiers, pour repérer les doublons et les versions plus récentes :
 {files}
 
 Pour chaque fichier examiné plus bas, "decision" vaut :
-- "garder" : encore d'actualité ou utile : pièce d'identité ou titre encore valable, contrat, bail, assurance, prêt ou abonnement en cours, diplôme, acte d'état civil, document médical utile, garantie d'un bien encore possédé ; facture, bulletin de paie, avis d'impôt, relevé ou déclaration de l'année en cours ou des deux précédentes. Dans le doute, garder.
-- "archiver" : ne sert plus au quotidien mais peut encore servir de preuve : pièce périmée ou remplacée par une plus récente, contrat, bail ou abonnement terminé, ancien logement ou ancien employeur, dossier clos ; facture, bulletin de paie, avis d'impôt, relevé ou déclaration plus anciens.
-- "supprimer" (corbeille) : sans intérêt : conditions générales (de vente, d'utilisation), notice, mentions légales, politique de confidentialité, publicité, newsletter, document générique qui ne le concerne pas personnellement ; fichier temporaire dont l'usage est passé (pré-demande, convocation, rendez-vous, billet ou réservation passés, code, QR code, brouillon) ; ou copie moins bonne d'un autre fichier examiné plus bas (le même document : scan plus flou, photo d'un document déjà scanné, version incomplète).
-- Jamais "supprimer" une facture, un justificatif comptable ou fiscal, un bulletin de paie, un contrat signé, une pièce d'identité ou un acte, sauf la copie moins bonne d'un autre fichier examiné : archive-les plutôt.
+- "garder" : SEULEMENT un document officiel encore d'actualité : pièce d'identité, passeport, permis, carte grise ou autre titre encore valable ; acte d'état civil, livret de famille ; diplôme, titre professionnel ; RIB et attestations encore valables (assurance, droits, Sécurité sociale) ; contrat signé encore en cours (bail, travail, prêt, assurance, mutuelle, abonnement) avec ses conditions particulières ; acte notarié, titre de propriété, règlement de copropriété, diagnostics et plans d'un logement encore possédé ; décision ou courrier encore utile d'une administration (impôts, URSSAF, CAF, Sécurité sociale, préfecture, tribunal) ; dossier ou démarche en cours, avec ses formulaires remplis et ses pièces ; compte rendu, résultat ou ordonnance médicaux de moins de deux ans ; avis d'impôt, bulletin de paie, relevé bancaire, facture ou justificatif de l'auto-entreprise de l'année en cours ou de l'année précédente.
+- "archiver" : un document officiel ou une preuve qui ne sert plus au quotidien : pièce périmée ou remplacée par une plus récente, contrat terminé, ancien logement ou ancien employeur, dossier clos, ancien document médical ; avis d'impôt, bulletin de paie, relevé, facture ou justificatif plus anciens ; facture d'achat d'un bien (preuve d'achat, garantie).
+- "supprimer" (corbeille) : ce qui n'est pas un document officiel et ne sert plus : reçu de paiement, ticket de caisse, bon de retrait, confirmation de commande, de souscription, d'inscription ou de réservation, preuve de dépôt, avis de réception ou suivi d'un recommandé ou d'un colis, accusé de réception, billet ou événement passé, devis non signé, test Covid, publicité, newsletter, conditions générales (de vente, d'utilisation), notice, mentions légales, politique de confidentialité, document générique qui ne le concerne pas personnellement, formulaire vierge, capture d'écran, brouillon, code, QR code, pré-demande, convocation ou rendez-vous passés ; ou copie moins bonne d'un autre fichier examiné plus bas (le même document : scan plus flou, photo d'un document déjà scanné, version incomplète).
+- Un reçu, une confirmation, un accusé ou un avis de réception, une preuve de dépôt ou un suivi n'est pas un document officiel, même quand il vient d'une administration ou concerne un contrat en cours : "supprimer".
+- Jamais "supprimer" une pièce d'identité, un acte, un diplôme, un contrat signé, un bulletin de paie, un avis d'impôt, ni une facture ou un justificatif de l'auto-entreprise, sauf la copie moins bonne d'un autre fichier examiné : archive-les plutôt.
+- Dans le doute entre "garder" et "archiver" : archiver, rien n'y est perdu.
 - Plusieurs versions d'un même document : garder la meilleure (la plus récente encore valable, complète et lisible), archiver les anciennes, supprimer les copies moins bonnes. Le recto et le verso d'un même document ne sont pas des doublons.
 - "doublon_de" : OBLIGATOIRE pour une copie moins bonne à supprimer : le nom exact du fichier examiné qu'on garde à sa place ; sinon null.
 Règles du propriétaire :
@@ -1138,22 +1144,29 @@ class Review:
             state["cursor"] = None
         state["withdrawn"] = {k: w for k, w in (state.get("withdrawn") or {}).items()
                               if isinstance(w, dict) and isinstance(w.get("action"), dict) and w["action"].get("id") == k}
-        migrated = state.get("rules", 1) < REVIEW_RULES
+        before = state.get("rules", 1)
+        migrated = before < REVIEW_RULES
         if migrated:
-            # A folder where a document was kept under former rules with a certainty the present ones act on (from REVIEW_LEAVE, below
-            # REVIEW_TRASH) is read again whole, at once: review.json did not keep what the model had proposed, and a copy leaves only when
-            # the one kept in its place is in the same question. Its decisions stand until then (a proposal already in the journal is not
-            # logged twice); the walk starts over from the first folder, a folder with nothing due being passed in the same pass.
             where = lambda k, e: (k.split("|", 1)[0], nfc(os.path.dirname(e["path"])))
-            again = {where(k, e) for k, e in state["files"].items() if e.get("decision") == "garder" and e.get("state") == "kept" and e.get("engine")
-                     and type(e.get("confidence")) in (int, float) and REVIEW_LEAVE <= e["confidence"] < REVIEW_TRASH}
-            due = [e for k, e in state["files"].items() if where(k, e) in again]
-            for e in due:
-                e["time"] = 0
-            if again:
+            again = set()
+            if before < 2:
+                # Rules of 05/11/2026 evening: a folder where a document was kept with a certainty the present rules act on (from
+                # REVIEW_LEAVE, below REVIEW_TRASH) is read again whole: review.json did not keep what the model had proposed, and a copy
+                # leaves only when the one kept in its place is in the same question.
+                again = {where(k, e) for k, e in state["files"].items() if e.get("decision") == "garder" and e.get("state") == "kept"
+                         and e.get("engine") and type(e.get("confidence")) in (int, float) and REVIEW_LEAVE <= e["confidence"] < REVIEW_TRASH}
+            due = {k for k, e in state["files"].items() if where(k, e) in again}
+            if before < 3:
+                # Rules of 06/11/2026: only official documents still current stay (the owner: a registered letter's tracking and a
+                # course's receipt, kept by the former rules, « ce ne sont pas des documents officiels »): every document kept by a model
+                # is asked again; what already leaves its folder keeps its decision.
+                due |= {k for k, e in state["files"].items() if e.get("state") == "kept" and e.get("engine")}
+            for k in due:
+                state["files"][k]["time"] = 0
+            if due:   # their decisions stand until then (a proposal already in the journal is not logged twice); the walk starts over
                 state["cursor"] = None
                 state.pop("rest_until", None)
-                log(f"review: new rules, {len(again)} folder(s) read again whole ({len(due)} document(s)), where documents stayed for lack of certainty")
+                log(f"review: new rules, {len({where(k, state['files'][k]) for k in due})} folder(s) read again ({len(due)} document(s))")
             state["rules"] = REVIEW_RULES
         # Nothing of the Drive goes to the trash (06/11/2026): what the trial proposed to trash there goes into its archive, where nothing is lost
         spared = [e for k, e in state["files"].items() if k.split("|", 1)[0] in REVIEW_NO_TRASH and e.get("decision") == "supprimer"
@@ -1169,6 +1182,7 @@ class Review:
         self.read_as = None if broken or migrated or spared else json.dumps(state, sort_keys=True)
         self.actions, self.later, self.planned, self.by_server = actions, later, set(), None
         self.roots, self.index = {}, None   # which roots show their theme folders; the entries by folder (both once per pass)
+        self.asked = 0   # documents asked about in this pass
 
     def changed(self):
         return json.dumps(self.state, sort_keys=True) != self.read_as
@@ -1277,6 +1291,11 @@ class Review:
         log(f"PLAN    {name}  ->  {e['decision']} — {why}")
         return True
 
+    def walk(self):
+        """The next folders read within this pass, until REVIEW_PASS documents were asked about; a pause, the walk's rest or its end stop it."""
+        while self.step() and self.asked < REVIEW_PASS:
+            pass
+
     def step(self):
         """One folder's documents read and decided, REVIEW_FILES at most, from the cursor on. True when a model was asked."""
         if self.now < max(self.state.get("rest_until", 0), self.state.get("pause_until", 0)):
@@ -1335,6 +1354,7 @@ class Review:
 
     def read(self, here, root, base, r, rel, listed, docs, keys, chunk, complete):
         """Asks about the chunk, records and carries out (on) or proposes (trial) the decisions, sums them up in one « revu »."""
+        self.asked += len(chunk)
         copies = {p: k for p, k in exact_copies(docs).items() if p in chunk}
         asked = [p for p in chunk if p not in copies]
         archive = archive_of(base)
@@ -1418,6 +1438,8 @@ class Review:
             del self.files[k]
         if sweep.get("files"):
             log(f"REVU    every theme folder read: {sweep['files']} document(s), {sweep.get('archiver', 0)} to archive, {sweep.get('supprimer', 0)} to trash")
+            if CLEANUP != "on":   # the trial's walk over: its bilan in the journal at once, for the agent who shows the owner his list
+                self.state.pop("bilan", None)
         if sweep.get("files") and not self.state.get("first_sweep"):
             self.state["first_sweep"] = self.now
             if CLEANUP == "on":
@@ -1645,7 +1667,7 @@ def decide():
                 if CLEANUP == "on":
                     review.apply_pending()
                 if CLEANUP in ("trial", "on") and not files:   # the models are free: the inboxes had nothing for them in this pass
-                    review.step()
+                    review.walk()
                 if CLEANUP in ("trial", "on"):
                     try:
                         review.bilan()
