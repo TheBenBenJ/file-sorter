@@ -120,7 +120,10 @@ DECISIONS = ("garder", "archiver", "supprimer")
 # four lesser copies of a replaced identity card stayed while their best one went to the archive).
 REVIEW_LEAVE, REVIEW_TRASH = 0.7, 0.9
 # Nothing of the Drive goes to the trash (the owner's rule of 06/11/2026): what the review would trash there goes into its archive instead.
-REVIEW_NO_TRASH = ("drive",)
+# FILE_SORTER_NO_TRASH=1 (the home server's unit, the owner's choice the same evening: « je préfère ne rien supprimer par précaution »):
+# nothing of iCloud either.
+REVIEW_NO_TRASH = ("icloud", "drive") if os.environ.get("FILE_SORTER_NO_TRASH") == "1" else ("drive",)
+KEPT_FROM_TRASH = lambda root: "rien n'est supprimé dans le Drive" if root == "drive" else "rien n'est supprimé, par précaution"   # why, in the journal
 REVIEW_RULES = 6            # the version of these rules in review.json: a document left in place by former ones is asked again
 # The review's state, folder by folder, in the unit's journal (BILAN lines), once per value: how the coding agents, who cannot open
 # review.json, read what it holds. A new value logs it again at the next pass.
@@ -129,10 +132,10 @@ REVIEW_BILAN_LINE = 16000   # characters of JSON per BILAN line at most (journal
 REVIEW_EXT = OFFICE + (".pdf", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff", ".rtf", ".pages", ".numbers", ".key", ".txt")
 REVIEW_VISUAL = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif")   # without text, Claude reads these (HEIC through a JPEG)
 REVIEW_FILES = 10           # documents asked about per question, one folder at a time; a folder of 10 or fewer is always read whole
-# documents asked about per pass at most, and seconds of the pass: several small folders in a row, so that a walk under new rules ends
-# within hours (06/11/2026; one folder a pass until then), well within the unit's 20 minutes. FILE_SORTER_REVIEW_PASS=1 keeps one folder
+# documents asked about per pass at most, and seconds of the pass: several folders in a row, so that a walk under new rules ends within
+# an hour or two (06/11/2026; one folder a pass until then), well within the unit's 20 minutes. FILE_SORTER_REVIEW_PASS=1 keeps one folder
 # a pass (the tests).
-REVIEW_PASS, REVIEW_PASS_TIME = max(1, int(os.environ.get("FILE_SORTER_REVIEW_PASS") or 60)), 240
+REVIEW_PASS, REVIEW_PASS_TIME = max(1, int(os.environ.get("FILE_SORTER_REVIEW_PASS") or 120)), 270
 REVIEW_APPLY = 40           # decisions applied per pass at most (once the trial is lifted, the trial's own first)
 REVIEW_CHARS = 1200         # of each document's text: enough to tell what it is
 REVIEW_LISTING = 150        # names of the folder given as context, at most
@@ -345,6 +348,9 @@ class Question:
 
 CONVENTION = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "convention.md")).read()
 RULES = open(os.path.join(HERE, "rules.md"), encoding="utf-8").read().strip()
+# The owner's rules for the review that the home server keeps (review-rules.md, written by its file-sorting.sh: which home is his, what
+# to keep of his health papers, of his studies…), after those of rules.md; optional. When either changes, every document is read again.
+REVIEW_OWNER = (lambda p: open(p, encoding="utf-8").read().strip() if os.path.isfile(p) else "")(os.path.join(HERE, "review-rules.md"))
 
 
 def jpeg_preview(p, jpg):
@@ -1005,7 +1011,7 @@ Pour chaque fichier examiné plus bas, "decision" vaut :
 - Plusieurs versions d'un même document : garder la meilleure (la plus récente encore valable, complète et lisible), archiver les anciennes, supprimer les copies moins bonnes. Le recto et le verso d'un même document ne sont pas des doublons.
 - "doublon_de" : OBLIGATOIRE pour une copie moins bonne à supprimer : le nom exact du fichier examiné qu'on garde à sa place ; sinon null.
 Règles du propriétaire :
-{RULES}
+{RULES}{chr(10) + REVIEW_OWNER if REVIEW_OWNER else ""}
 {confidence}
 - "raison" : une phrase courte.
 - Le champ "fichier" doit reprendre EXACTEMENT le nom donné après "###". Réponds pour CHAQUE fichier.
@@ -1184,15 +1190,32 @@ class Review:
                 state.pop("rest_until", None)
                 log(f"review: new rules, {len({where(k, state['files'][k]) for k in due})} folder(s) read again ({len(due)} document(s))")
             state["rules"] = REVIEW_RULES
-        # Nothing of the Drive goes to the trash (06/11/2026): what the trial proposed to trash there goes into its archive, where nothing is lost
-        spared = [e for k, e in state["files"].items() if k.split("|", 1)[0] in REVIEW_NO_TRASH and e.get("decision") == "supprimer"
-                  and e.get("state") == "pending"]
-        for e in spared:
-            e.update(decision="archiver", proposal="supprimer")
-        if spared:
-            log(f"review: {len(spared)} decision(s) to trash in the Drive go into its archive instead: nothing of the Drive is trashed")
-            later.append(("revu", place("drive"), {"detail": f"{len(spared)} document(s) proposé(s) pour la corbeille partent plutôt aux archives : "
-                                                             "rien n'est supprimé dans le Drive"}))
+        # When the owner's rules change (rules.md, review-rules.md), every document a model decided is read again under them, the walk
+        # starting over. The first pass of this code records them as they are, unless the server's own rules came with it.
+        owner = hashlib.sha1((RULES + "\n" + REVIEW_OWNER).encode("utf-8")).hexdigest()[:12]
+        if state.get("owner") != owner:
+            if "owner" in state or REVIEW_OWNER:
+                where = lambda k, e: (k.split("|", 1)[0], nfc(os.path.dirname(e["path"])))
+                again = {k for k, e in state["files"].items() if e.get("engine") and e.get("state") in ("kept", "pending")}
+                for k in again:
+                    state["files"][k]["time"] = 0
+                if again:
+                    state["cursor"] = None
+                    state.pop("rest_until", None)
+                    log(f"review: the owner's rules changed, {len({where(k, state['files'][k]) for k in again})} folder(s) read again ({len(again)} document(s))")
+            state["owner"], migrated = owner, True
+        # Nothing of the Drive goes to the trash (06/11/2026), nor of iCloud under FILE_SORTER_NO_TRASH: what the trial proposed to trash
+        # there goes into the archive, where nothing is lost
+        spared = [(k.split("|", 1)[0], e) for k, e in state["files"].items() if k.split("|", 1)[0] in REVIEW_NO_TRASH
+                  and e.get("decision") == "supprimer" and e.get("state") == "pending"]
+        for root in REVIEW_NO_TRASH:
+            mine = [e for r, e in spared if r == root]
+            for e in mine:
+                e.update(decision="archiver", proposal="supprimer")
+            if mine:
+                log(f"review: {len(mine)} decision(s) to trash in {place(root)} go into its archive instead: nothing is trashed there")
+                later.append(("revu", place(root), {"detail": f"{len(mine)} document(s) proposé(s) pour la corbeille partent plutôt aux archives : "
+                                                              f"{KEPT_FROM_TRASH(root)}"}))
         self.state, self.files, self.withdrawn = state, state["files"], state["withdrawn"]
         # a broken, migrated or spared one is written again at once
         self.read_as = None if broken or migrated or spared else json.dumps(state, sort_keys=True)
@@ -1233,7 +1256,7 @@ class Review:
         if e.get("twin") and not reason.startswith("copie identique"):
             reason = f"copie moins bonne de « {os.path.basename(e['twin'])} »" + (f" : {reason}" if reason else "")
         if e.get("decision") == "archiver" and e.get("proposal") == "supprimer":
-            reason = (reason or "décision du modèle") + (" ; à l'archive plutôt qu'à la corbeille : rien n'est supprimé dans le Drive"
+            reason = (reason or "décision du modèle") + (f" ; à l'archive plutôt qu'à la corbeille : {KEPT_FROM_TRASH(root)}"
                                                          if root in REVIEW_NO_TRASH else " ; à l'archive plutôt qu'à la corbeille, faute de certitude")
         return reason or "décision du modèle"
 
@@ -1385,8 +1408,9 @@ class Review:
         _, to_claude, local, missing, claude, failure, groups = ask(items, q, False, "review: ") if items else ([], [], {}, {}, {}, None, [])
         verdicts = judge({**{p: (d, LOCAL_AI) for p, d in local.items()}, **{p: (d, CLAUDE_AI) for p, d in claude.items()}}, groups, copies)
         verdicts.update({p: ("garder", 0.0, None, "format que la relecture ne lit pas", None, None, None) for p in unreadable})
-        if root in REVIEW_NO_TRASH:   # nothing of the Drive goes to the trash (06/11/2026): into its archive, where nothing is lost
-            verdicts = {p: ("archiver", *v[1:5], "supprimer, jamais de corbeille dans le Drive", v[6] or "supprimer") if v[0] == "supprimer" else v
+        if root in REVIEW_NO_TRASH:   # nothing of the Drive goes to the trash (06/11/2026), nor of iCloud under FILE_SORTER_NO_TRASH: the archive
+            verdicts = {p: ("archiver", *v[1:5], f"supprimer, jamais de corbeille{' dans le Drive' if root == 'drive' else ''}", v[6] or "supprimer")
+                        if v[0] == "supprimer" else v
                         for p, v in verdicts.items()}
         to_claude = {p for p, _ in to_claude}
         unanswered = [p for p in asked if p not in verdicts]
@@ -1830,7 +1854,7 @@ def apply_action(a, moved, kept):
         log(f"ARCHIVÉ {name}  ->  {'Drive/' if a['cible']['racine'] == 'drive' else ''}{os.path.relpath(target, roots[a['cible']['racine']])} — {a.get('raison', '')}")
     elif a["type"] == "supprimer":   # the review: a document of no use, or a lesser copy, to the Trash
         if a["source"]["racine"] in REVIEW_NO_TRASH:   # the owner's rule of 06/11/2026: the server sends no such action
-            raise ValueError("rien n'est mis à la corbeille dans le Drive")
+            raise ValueError("rien n'est mis à la corbeille dans le Drive" if a["source"]["racine"] == "drive" else "rien n'est mis à la corbeille par la relecture")
         kept = a.get("garde")   # a copy: the one kept in its place, still in its folder or archived since
         if kept and not any(os.path.exists(os.path.join(roots[kept["racine"]], *x, nfc(kept["chemin"])))
                             for x in ((), (archive_of(roots[kept["racine"]]),))):

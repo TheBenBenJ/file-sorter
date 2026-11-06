@@ -1041,13 +1041,52 @@ st["files"].update({f"icloud|{f.relative_to(icloud5)}|{f.stat().st_size}": entry
 st.update(rules=4, rest_until=time.time() + 3600)
 (data5 / "review.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
 review_answers({"Offre d'achat appartement.txt": ("supprimer", None, 0.95, "projet d'achat sans acte de vente, abandonné"),
-                "Plans du lot.txt": ("supprimer", None, 0.95, "plans d'un bien jamais acheté")})
+                "Plans du lot.txt": ("supprimer", None, 0.95, "plans d'un bien jamais acheté"), "Offre de prêt immobilier.txt": ("garder", None, 0.95, "prêt en cours")})
 Local.asked.clear()
 p = run("--decide", FILE_SORTER_REVIEW_PASS="30", FILE_SORTER_ICLOUD=str(icloud5), FILE_SORTER_DRIVE=str(drive5), FILE_SORTER_DATA=str(data5), FAKE_DRIVE=str(drive5))
 check("rules of 06/11, later: from rules 4 or 5, only the folders of a purchase are read again whole, the others keep their decisions",
       p.returncode == 0 and "review: new rules, 2 folder(s) read again (3 document(s))" in p.stdout
       and {n for x in Local.asked for n in x["names"]} == {"Offre d'achat appartement.txt", "Plans du lot.txt", "Offre de prêt immobilier.txt"}
       or print(p.stdout[-2500:]))
+
+# the owner's rules kept by the home server (review-rules.md) join rules.md: when they change, everything is read again; nothing to the
+# trash in iCloud either under FILE_SORTER_NO_TRASH=1 (the home server's unit since the owner's choice of 06/11/2026 evening)
+owner_code = T / "code-owner"
+shutil.copytree(code, owner_code)
+(owner_code / "review-rules.md").write_text("- Santé : tout ce qui concerne ma santé se garde, c'est mon historique médical.\n"
+                                            "- Relevés de banque : archiver.\n", encoding="utf-8")
+review_answers({"Offre de prêt immobilier.txt": ("garder", None, 0.95, "prêt en cours"), "Ancien permis.txt": ("archiver", None, 0.9, "permis remplacé"),
+                "La Poste - Avis de réception recommandé.txt": ("supprimer", None, 0.95, "avis de réception"),
+                "France Stage Permis - Reçu de paiement.txt": ("supprimer", None, 0.95, "reçu de paiement"),
+                "Préfecture - Reconstitution de points.txt": ("garder", None, 0.95, "décision de la préfecture"),
+                "Cora - Ticket de caisse.txt": ("supprimer", None, 0.95, "ticket de caisse"),
+                "Offre d'achat appartement.txt": ("supprimer", None, 0.95, "projet abandonné"), "Plans du lot.txt": ("supprimer", None, 0.95, "projet abandonné"),
+                "Compte rendu médical.txt": ("garder", None, 0.95, "historique médical")})
+n5 = len([x for x in (data5 / "activity.jsonl").read_text(encoding="utf-8").splitlines()])
+Local.asked.clear()
+code, saved_code = owner_code, code
+try:
+    p = run("--decide", FILE_SORTER_REVIEW_PASS="30", FILE_SORTER_NO_TRASH="1", FILE_SORTER_ICLOUD=str(icloud5), FILE_SORTER_DRIVE=str(drive5),
+            FILE_SORTER_DATA=str(data5), FAKE_DRIVE=str(drive5))
+finally:
+    code = saved_code
+oev = [json.loads(x) for x in (data5 / "activity.jsonl").read_text(encoding="utf-8").splitlines()][n5:]
+st5 = json.loads((data5 / "review.json").read_text(encoding="utf-8"))
+sent = "".join(x["body"]["messages"][0]["content"] for x in Local.asked)
+check("owner's rules of the home server: in the question after rules.md; when they change, everything a model decided is read again",
+      p.returncode == 0 and "review: the owner's rules changed, 5 folder(s) read again (9 document(s))" in p.stdout
+      and "- Santé : tout ce qui concerne ma santé se garde, c'est mon historique médical." in sent and len({n for x in Local.asked for n in x["names"]}) == 9
+      or print(p.stdout[-2500:]))
+check("FILE_SORTER_NO_TRASH=1: what the trial proposed to trash in iCloud goes into the archive, said once, the new decisions too",
+      [(x["action"], x["object"], x["detail"]) for x in oev if x["action"] == "revu" and x["object"] == "iCloud"]
+      == [("revu", "iCloud", "5 document(s) proposé(s) pour la corbeille partent plutôt aux archives : rien n'est supprimé, par précaution")]
+      and not [x for x in oev if x["action"] == "à supprimer"]
+      and not [e for e in st5["files"].values() if e.get("decision") == "supprimer" and e.get("state") == "pending"]
+      and st5["files"][next(k for k in st5["files"] if "Cora" in k)]["proposal"] == "supprimer"
+      and "BILAN   end: 10 document(s), 3 kept, 6 to archive, 1 unreadable (FILE_SORTER_CLEANUP=trial)" in p.stdout)
+check("FILE_SORTER_NO_TRASH=1: the journal and the bilan say why a document goes to the archive rather than the trash",
+      any("Cora - Ticket de caisse.txt" in line and "à l'archive plutôt qu'à la corbeille : rien n'est supprimé, par précaution" in line
+          for line in p.stdout.splitlines() if "RELU" in line))
 
 # ---- what the iPhone saves into the Drive without a folder: Chrome's « Enregistré depuis Chrome » and the Drive's root, sorted too ----
 C = T / "chrome"
