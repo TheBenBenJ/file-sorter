@@ -932,7 +932,7 @@ claude_asked()
 p = run("--decide", **nenv)
 ev = nevents()
 check("rules: under new rules, a folder where a document stayed for lack of certainty is read again whole at once, the walk starting over",
-      p.returncode == 0 and "review: new rules, 1 folder(s) read again (3 document(s))" in p.stdout and nstate()["rules"] == 3
+      p.returncode == 0 and "review: new rules, 1 folder(s) read again (3 document(s))" in p.stdout and nstate()["rules"] == 4
       and [sorted(x["names"]) for x in Local.asked] == [sorted(["2013-11-27 Banque - RIB.txt", "2024-01-10 Banque - RIB.txt", "2019-01-07 Banque - Relevé.txt"])]
       or print(p.stdout[-3000:], p.stderr[-3000:]))
 check("rules: a lesser copy wanted in the trash at 0.75 goes to the archive, saying why; a proposal already in the journal is not repeated",
@@ -975,12 +975,14 @@ check("rules, on: what was not sure enough for the trash is archived by the Mac,
 O = T / "official"
 icloud5, drive5, data5 = O / "icloud", O / "drive", O / "data"
 permis5, factures5 = icloud5 / "10 Identité & Banque" / "Permis de conduire", icloud5 / "60 Finances" / "Factures & Reçus"
-for d in (data5, icloud5 / "00 À trier", drive5 / "00 À trier", drive5 / "50 Travail", permis5, factures5):
+banque5 = icloud5 / "10 Identité & Banque" / "Banque"
+for d in (data5, icloud5 / "00 À trier", drive5 / "00 À trier", drive5 / "50 Travail", permis5, factures5, banque5):
     d.mkdir(parents=True, exist_ok=True)
-docs5 = {permis5 / "La Poste - Avis de réception recommandé.txt": ("garder", 0.98, "kept", "local"),
+docs5 = {banque5 / "Offre de prêt immobilier.txt": ("archiver", 0.95, "pending", "local"),   # the owner still lives there: it comes back
+         permis5 / "La Poste - Avis de réception recommandé.txt": ("garder", 0.98, "kept", "local"),
          permis5 / "France Stage Permis - Reçu de paiement.txt": ("garder", 0.99, "kept", "local"),
          permis5 / "Préfecture - Reconstitution de points.txt": ("garder", 0.99, "kept", "local"),
-         permis5 / "Ancien permis.txt": ("archiver", 0.9, "pending", "local"),   # already leaving: neither asked again nor listed
+         permis5 / "Ancien permis.txt": ("archiver", 0.9, "pending", "local"),   # already leaving: asked again too, the same proposal
          factures5 / "Cora - Ticket de caisse.txt": ("garder", 0.95, "kept", "local"),
          factures5 / "Vieux tableur.xls": ("garder", 0.0, "kept", None)}   # a format the review does not read: no model asked
 for f in docs5:
@@ -991,7 +993,9 @@ entry5 = lambda f, dec, c, state, engine: {"path": str(f.relative_to(icloud5)), 
 (data5 / "review.json").write_text(json.dumps({"files": {f"icloud|{f.relative_to(icloud5)}|{f.stat().st_size}": entry5(f, *v) for f, v in docs5.items()},
                                                "rules": 2, "cursor": None, "rest_until": time.time() + 3600, "first_sweep": time.time(), "bilan": "2026-11-06"},
                                               ensure_ascii=False), encoding="utf-8")
-review_answers({"La Poste - Avis de réception recommandé.txt": ("supprimer", None, 0.95, "avis de réception, pas un document officiel"),
+review_answers({"Offre de prêt immobilier.txt": ("garder", None, 0.95, "prêt en cours, sans preuve de sa fin"),
+                "Ancien permis.txt": ("archiver", None, 0.9, "permis remplacé"),
+                "La Poste - Avis de réception recommandé.txt": ("supprimer", None, 0.95, "avis de réception, pas un document officiel"),
                 "France Stage Permis - Reçu de paiement.txt": ("supprimer", None, 0.95, "reçu de paiement, pas un document officiel"),
                 "Préfecture - Reconstitution de points.txt": ("garder", None, 0.95, "décision de la préfecture"),
                 "Cora - Ticket de caisse.txt": ("supprimer", None, 0.95, "ticket de caisse")})
@@ -999,22 +1003,28 @@ Local.asked.clear()
 p = run("--decide", FILE_SORTER_REVIEW_PASS="30", FILE_SORTER_ICLOUD=str(icloud5), FILE_SORTER_DRIVE=str(drive5), FILE_SORTER_DATA=str(data5), FAKE_DRIVE=str(drive5))
 asked = {n for x in Local.asked for n in x["names"]}
 oev = [json.loads(x) for x in (data5 / "activity.jsonl").read_text(encoding="utf-8").splitlines()] if (data5 / "activity.jsonl").exists() else []
-check("rules of 06/11: every document a model kept is asked again at once, the walk starting over; not what leaves, nor what cannot be read",
-      p.returncode == 0 and "review: new rules, 2 folder(s) read again (4 document(s))" in p.stdout
-      and json.loads((data5 / "review.json").read_text(encoding="utf-8"))["rules"] == 3
-      and asked == {"La Poste - Avis de réception recommandé.txt", "France Stage Permis - Reçu de paiement.txt", "Préfecture - Reconstitution de points.txt",
-                    "Cora - Ticket de caisse.txt"}
+check("rules of 06/11: every document a model decided is asked again at once, what leaves included, the walk starting over; not what cannot be read",
+      p.returncode == 0 and "review: new rules, 3 folder(s) read again (6 document(s))" in p.stdout
+      and json.loads((data5 / "review.json").read_text(encoding="utf-8"))["rules"] == 4
+      and asked == {"Offre de prêt immobilier.txt", "Ancien permis.txt", "La Poste - Avis de réception recommandé.txt", "France Stage Permis - Reçu de paiement.txt",
+                    "Préfecture - Reconstitution de points.txt", "Cora - Ticket de caisse.txt"}
       or print(p.stdout[-3000:], p.stderr[-2000:]))
 check("rules of 06/11: several folders read in one pass, each in its « revu »; the receipts and the acknowledgement « à supprimer »",
-      [x["object"] for x in oev if x["action"] == "revu"] == ["iCloud/10 Identité & Banque/Permis de conduire", "iCloud/60 Finances/Factures & Reçus"]
+      [x["object"] for x in oev if x["action"] == "revu"] == ["iCloud/10 Identité & Banque/Banque", "iCloud/10 Identité & Banque/Permis de conduire",
+                                                             "iCloud/60 Finances/Factures & Reçus"]
       and sorted(x["object"] for x in oev if x["action"] == "à supprimer") == ["Cora - Ticket de caisse.txt", "France Stage Permis - Reçu de paiement.txt",
                                                                                "La Poste - Avis de réception recommandé.txt"])
-check("rules of 06/11: the trial's walk over, its bilan in the journal at once", "BILAN   end: 6 document(s), 1 kept, 1 to archive, 3 to trash, 1 unreadable" in p.stdout)
+check("rules of 06/11: a proposal withdrawn on a re-read is said, « gardé », with why; one repeated is not",
+      [(x["action"], x["object"], x["detail"]) for x in oev if x["action"] == "gardé"]
+      == [("gardé", "Offre de prêt immobilier.txt", "relu, reste finalement dans son dossier : prêt en cours, sans preuve de sa fin")]
+      and not [x for x in oev if x["object"] == "Ancien permis.txt"])
+check("rules of 06/11: the trial's walk over, its bilan in the journal at once", "BILAN   end: 7 document(s), 2 kept, 1 to archive, 3 to trash, 1 unreadable" in p.stdout)
 sent = next(x for x in Local.asked if "### Cora - Ticket de caisse.txt" in x["body"]["messages"][0]["content"])["body"]["messages"][0]["content"]
 check("rules of 06/11: the question keeps only official documents still current, a receipt or an acknowledgement is none, in doubt the archive",
       '"garder" : SEULEMENT un document officiel encore d\'actualité' in sent and 'Dans le doute entre "garder" et "archiver" : archiver' in sent
       and "Un reçu, une confirmation, un accusé ou un avis de réception, une preuve de dépôt ou un suivi n'est pas un document officiel" in sent
-      and "Ancien permis" not in "".join(x["body"]["messages"][0]["content"] for x in Local.asked))
+      and "restent en cours tant que la liste ne montre pas leur fin" in sent and "Une démarche aboutie ne garde que son résultat" in sent
+      and "Un extrait d'acte et le livret de famille sont deux documents différents" in sent)
 
 # ---- what the iPhone saves into the Drive without a folder: Chrome's « Enregistré depuis Chrome » and the Drive's root, sorted too ----
 C = T / "chrome"
