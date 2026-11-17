@@ -1010,7 +1010,7 @@ Pour chaque fichier examiné plus bas, "decision" vaut :
 - Dans le doute entre "garder" et "archiver" : archiver, rien n'y est perdu.
 - Plusieurs versions d'un même document : garder la meilleure (la plus récente encore valable, complète et lisible), archiver les anciennes, supprimer les copies moins bonnes. Le recto et le verso d'un même document ne sont pas des doublons.
 - "doublon_de" : OBLIGATOIRE pour une copie moins bonne à supprimer : le nom exact du fichier examiné qu'on garde à sa place ; sinon null.
-Règles du propriétaire :
+Règles du propriétaire (elles priment sur tout ce qui précède quand elles disent autre chose) :
 {RULES}{chr(10) + REVIEW_OWNER if REVIEW_OWNER else ""}
 {confidence}
 - "raison" : une phrase courte.
