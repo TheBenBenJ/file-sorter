@@ -932,7 +932,7 @@ claude_asked()
 p = run("--decide", **nenv)
 ev = nevents()
 check("rules: under new rules, a folder where a document stayed for lack of certainty is read again whole at once, the walk starting over",
-      p.returncode == 0 and "review: new rules, 1 folder(s) read again (3 document(s))" in p.stdout and nstate()["rules"] == 6
+      p.returncode == 0 and "review: new rules, 1 folder(s) read again (3 document(s))" in p.stdout and nstate()["rules"] == 7
       and [sorted(x["names"]) for x in Local.asked] == [sorted(["2013-11-27 Banque - RIB.txt", "2024-01-10 Banque - RIB.txt", "2019-01-07 Banque - Relevé.txt"])]
       or print(p.stdout[-3000:], p.stderr[-3000:]))
 check("rules: a lesser copy wanted in the trash at 0.75 goes to the archive, saying why; a proposal already in the journal is not repeated",
@@ -1003,11 +1003,11 @@ Local.asked.clear()
 p = run("--decide", FILE_SORTER_REVIEW_PASS="30", FILE_SORTER_ICLOUD=str(icloud5), FILE_SORTER_DRIVE=str(drive5), FILE_SORTER_DATA=str(data5), FAKE_DRIVE=str(drive5))
 asked = {n for x in Local.asked for n in x["names"]}
 oev = [json.loads(x) for x in (data5 / "activity.jsonl").read_text(encoding="utf-8").splitlines()] if (data5 / "activity.jsonl").exists() else []
-check("rules of 06/11: every document a model decided is asked again at once, what leaves included, the walk starting over; not what cannot be read",
+check("rules of 06/11: every document a model decided is asked again at once, what leaves included, the walk starting over; what cannot be read too, on its name",
       p.returncode == 0 and "review: new rules, 3 folder(s) read again (6 document(s))" in p.stdout
-      and json.loads((data5 / "review.json").read_text(encoding="utf-8"))["rules"] == 6
+      and json.loads((data5 / "review.json").read_text(encoding="utf-8"))["rules"] == 7
       and asked == {"Offre de prêt immobilier.txt", "Ancien permis.txt", "La Poste - Avis de réception recommandé.txt", "France Stage Permis - Reçu de paiement.txt",
-                    "Préfecture - Reconstitution de points.txt", "Cora - Ticket de caisse.txt"}
+                    "Préfecture - Reconstitution de points.txt", "Cora - Ticket de caisse.txt", "Vieux tableur.xls"}   # the unreadable one too, on its name
       or print(p.stdout[-3000:], p.stderr[-2000:]))
 check("rules of 06/11: several folders read in one pass, each in its « revu »; the receipts and the acknowledgement « à supprimer »",
       [x["object"] for x in oev if x["action"] == "revu"] == ["iCloud/10 Identité & Banque/Banque", "iCloud/10 Identité & Banque/Permis de conduire",
@@ -1018,7 +1018,7 @@ check("rules of 06/11: a proposal withdrawn on a re-read is said, « gardé », 
       [(x["action"], x["object"], x["detail"]) for x in oev if x["action"] == "gardé"]
       == [("gardé", "Offre de prêt immobilier.txt", "relu, reste finalement dans son dossier : prêt en cours, sans preuve de sa fin")]
       and not [x for x in oev if x["object"] == "Ancien permis.txt"])
-check("rules of 06/11: the trial's walk over, its bilan in the journal at once", "BILAN   end: 7 document(s), 2 kept, 1 to archive, 3 to trash, 1 unreadable" in p.stdout)
+check("rules of 06/11: the trial's walk over, its bilan in the journal at once", "BILAN   end: 7 document(s), 3 kept, 1 to archive, 3 to trash" in p.stdout)
 sent = next(x for x in Local.asked if "### Cora - Ticket de caisse.txt" in x["body"]["messages"][0]["content"])["body"]["messages"][0]["content"]
 check("rules of 06/11: the question keeps only official documents still current, a receipt or an acknowledgement is none, in doubt the archive",
       '"garder" : SEULEMENT un document officiel encore d\'actualité' in sent and 'Dans le doute entre "garder" et "archiver" : archiver' in sent
@@ -1075,7 +1075,7 @@ st5 = json.loads((data5 / "review.json").read_text(encoding="utf-8"))
 sent = "".join(x["body"]["messages"][0]["content"] for x in Local.asked)
 check("owner's rules of the home server: in the question after rules.md; when they change, everything a model decided is read again",
       p.returncode == 0 and "review: the owner's rules changed, 5 folder(s) read again (9 document(s))" in p.stdout
-      and "- Santé : tout ce qui concerne ma santé se garde, c'est mon historique médical." in sent and len({n for x in Local.asked for n in x["names"]}) == 9
+      and "- Santé : tout ce qui concerne ma santé se garde, c'est mon historique médical." in sent and len({n for x in Local.asked for n in x["names"]}) == 10
       or print(p.stdout[-2500:]))
 check("FILE_SORTER_NO_TRASH=1: what the trial proposed to trash in iCloud goes into the archive, said once, the new decisions too",
       [(x["action"], x["object"], x["detail"]) for x in oev if x["action"] == "revu" and x["object"] == "iCloud"]
@@ -1083,7 +1083,7 @@ check("FILE_SORTER_NO_TRASH=1: what the trial proposed to trash in iCloud goes i
       and not [x for x in oev if x["action"] == "à supprimer"]
       and not [e for e in st5["files"].values() if e.get("decision") == "supprimer" and e.get("state") == "pending"]
       and st5["files"][next(k for k in st5["files"] if "Cora" in k)]["proposal"] == "supprimer"
-      and "BILAN   end: 10 document(s), 3 kept, 6 to archive, 1 unreadable (FILE_SORTER_CLEANUP=trial)" in p.stdout)
+      and "BILAN   end: 10 document(s), 4 kept, 6 to archive (FILE_SORTER_CLEANUP=trial)" in p.stdout)
 check("FILE_SORTER_NO_TRASH=1: the journal and the bilan say why a document goes to the archive rather than the trash",
       any("Cora - Ticket de caisse.txt" in line and "à l'archive plutôt qu'à la corbeille : rien n'est supprimé, par précaution" in line
           for line in p.stdout.splitlines() if "RELU" in line))

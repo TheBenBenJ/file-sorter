@@ -4,6 +4,9 @@
 Writes tidiness-state.json (read by the Dashboard): loose files next to subfolders,
 names outside the convention, files lying in an inbox (« 00 À trier »...) for more than 7 days, and what the sorting
 left in ~/Downloads (not a document, or too big for the Drive) for more than 7 days.
+The archive (« 90 Archives » of iCloud and of the Drive) is not audited: the sorting's review moves there, at the same
+path and under the same name, what is no longer current, so a file loose in its theme folder is loose there too, and
+nothing in it waits for anyone (Benjamin, 20/11/2026: « ce ne sont que des éléments qui devraient être archivés »).
 Reads names and dates only: nothing is downloaded, modified or deleted.
 """
 import json, os, re, time, unicodedata
@@ -22,6 +25,8 @@ OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tidiness-stat
 # intended exceptions (see the rangement-cloud skill)
 BUNDLES = tuple(SETTINGS["paquets"])
 LOOSE_ALLOWED = set(SETTINGS["vrac_autorise"])
+# the archive, as sort.py finds it: an « NN Archives » at a root, or the settings' name
+ARCHIVES, ARCHIVE_NAME = SETTINGS.get("archives") or "90 Archives", re.compile(r"\d\d Archives?", re.I)
 # suspicious names; the French words match the French names of scans and downloads
 SUSPECT_NAME = re.compile(r"_|\(\d+\)|[0-9a-f]{8}-[0-9a-f]{4}|compressed|^IMG_\d|^(?!.*[a-zà-ÿ]).{8,}\.\w+$|^(Document|Scan|Numériser|image|téléchargement)\b", re.I)
 CODE_MARKERS = {"package.json", "composer.json", "pom.xml", ".git", "angular.json", "src", "app", "vendor", "node_modules"}
@@ -40,6 +45,8 @@ def audit():
         for r, ds, fs in os.walk(root):
             ds[:] = [d for d in ds if not d.startswith(".")]
             rel = unicodedata.normalize("NFC", os.path.relpath(r, root))   # the Mac decomposes accents
+            if rel == ".":   # the archive: what the review moved there keeps its path and its name, nothing to tidy
+                ds[:] = [d for d in ds if not ARCHIVE_NAME.fullmatch(unicodedata.normalize("NFC", d)) and unicodedata.normalize("NFC", d) != ARCHIVES]
             if CODE_MARKERS & set(ds + fs):
                 ds[:] = []
                 continue
