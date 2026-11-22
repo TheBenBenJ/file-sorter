@@ -70,7 +70,7 @@ Plan actions (`plan.json`): `ranger` (file it at `cible`), `doublon` (to the Tra
 
 ### Other scripts
 
-- `audit.py`: no AI; writes `tidiness-state.json` (loose files next to sub-folders, names outside the convention, files waiting in an inbox for more than 7 days, `00 Pièces jointes` excepted: it keeps doubtful attachments on purpose) for a dashboard. `sort.py` runs it after each pass on the Mac.
+- `audit.py`: no AI; writes `tidiness-state.json` for a dashboard. Since 22/11/2026 it asks for nothing by hand (`total` 0: what the sorting cannot place stays in `00 À trier` or `~/Downloads` on purpose); loose files and doubtful names are kept as `vrac_info` and `noms_info` for the record. `sort.py` runs it after each pass on the Mac.
 - `rename.py plan|apply|undo`: bulk renaming of existing documents according to `convention.md`. `plan` writes `data/rename-plan.json` and a `.tsv` to review, `apply` keeps an undo journal (`data/rename-undo.json`), `undo` restores the names.
 - `apply_plan.py verify|apply|undo`: applies a tidying plan (a JSON list of `move` and `trash` operations) after checks, with an undo journal in `data/` (`undo-tidy-<date>.json`).
 

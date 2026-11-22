@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Tidiness audit, without AI: counts what is not tidy in iCloud and the Drive.
 
-Writes tidiness-state.json (read by the Dashboard): loose files next to subfolders,
-names outside the convention, files lying in an inbox (« 00 À trier »...) for more than 7 days, and what the sorting
-left in ~/Downloads (not a document, or too big for the Drive) for more than 7 days.
+Writes tidiness-state.json (read by the Dashboard). Since 22/11/2026 (ticket 36) nothing in it asks Benjamin for a manual action:
+« total » is 0 and the lists the Dashboard shows (vrac, noms, a_trier_vieux, telechargements_vieux) are empty, because a file the sorting
+cannot place stays in « 00 À trier » (or in ~/Downloads) on purpose. The loose files and the names outside the convention are kept as
+« vrac_info » and « noms_info », for the record.
 The archive (« 90 Archives » of iCloud and of the Drive) is not audited: the sorting's review moves there, at the same
 path and under the same name, what is no longer current, so a file loose in its theme folder is loose there too, and
 nothing in it waits for anyone (Benjamin, 20/11/2026: « ce ne sont que des éléments qui devraient être archivés »).
@@ -19,7 +20,6 @@ ROOTS = {
     "iCloud": os.path.join(HOME, "Library/Mobile Documents/com~apple~CloudDocs"),
     "Drive": os.path.join(HOME, SETTINGS["drive"]),
 }
-DOWNLOADS = os.path.join(HOME, "Downloads")
 OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tidiness-state.json")
 
 # intended exceptions (see the rangement-cloud skill)
@@ -30,15 +30,9 @@ ARCHIVES, ARCHIVE_NAME = SETTINGS.get("archives") or "90 Archives", re.compile(r
 # suspicious names; the French words match the French names of scans and downloads
 SUSPECT_NAME = re.compile(r"_|\(\d+\)|[0-9a-f]{8}-[0-9a-f]{4}|compressed|^IMG_\d|^(?!.*[a-zà-ÿ]).{8,}\.\w+$|^(Document|Scan|Numériser|image|téléchargement)\b", re.I)
 CODE_MARKERS = {"package.json", "composer.json", "pom.xml", ".git", "angular.json", "src", "app", "vendor", "node_modules"}
-STALE_AFTER = 7 * 86400
-# The Drive's inbox of mail attachments keeps the doubtful ones on purpose (kept.json): hundreds after a mailbox's backlog, which the
-# Dashboard's tile would show as files waiting; Benjamin looks at it when he wants to
-QUIET_INBOXES = ("00 Pièces jointes",)
-
 
 def audit():
-    loose, names, stale = [], [], []
-    now = time.time()
+    loose, names = [], []
     for label, root in ROOTS.items():
         if not os.path.isdir(root):
             continue
@@ -51,13 +45,7 @@ def audit():
                 ds[:] = []
                 continue
             fs = [f for f in fs if not f.startswith(".") and not f.endswith((".gscript",))]
-            if rel.startswith("00 "):
-                for f in fs if rel.split(os.sep)[0] not in QUIET_INBOXES else ():
-                    try:
-                        if now - max(os.stat(os.path.join(r, f)).st_mtime, os.stat(os.path.join(r, f)).st_ctime) > STALE_AFTER:
-                            stale.append(f"{label}/{rel}/{f}")
-                    except OSError:
-                        pass
+            if rel.startswith("00 "):   # an inbox: where the sorting leaves what it cannot place
                 continue
             if any(p in "/" + rel for p in BUNDLES):
                 continue
@@ -66,17 +54,12 @@ def audit():
             if rel == "." and fs:
                 loose += [f"{label}/{f}" for f in fs]
             names += [f"{label}/{rel}/{f}" for f in fs if SUSPECT_NAME.search(f)]
-    downloads = []   # left there by sort.py: Benjamin keeps or deletes them himself
-    for f in sorted(os.listdir(DOWNLOADS)) if os.path.isdir(DOWNLOADS) else []:
-        try:
-            st = os.stat(os.path.join(DOWNLOADS, f))
-        except OSError:
-            continue
-        if not f.startswith(".") and now - max(st.st_mtime, st.st_ctime) > STALE_AFTER:
-            downloads.append(f"Téléchargements/{f}")
-    # the keys are read by the Dashboard: they stay as they are (French, like the others)
-    return {"date": datetime.now().isoformat(timespec="minutes"), "vrac": loose, "noms": names, "a_trier_vieux": stale,
-            "telechargements_vieux": downloads, "total": len(set(loose) | set(names) | set(stale) | set(downloads))}
+    # No alert for something to do by hand (Benjamin, ticket 36, 22/11/2026: « si on ne trouve pas où ranger, on met dans à trier »): what waits
+    # in an inbox or in ~/Downloads is where the sorting leaves what it cannot place, so it is no longer reported, and the loose files and
+    # the doubtful names are kept in the state for the record only (the review archives what is no longer current by itself).
+    # The keys are read by the Dashboard: they stay as they are (French, like the others); « total » is what the Dashboard shows as to do.
+    return {"date": datetime.now().isoformat(timespec="minutes"), "vrac": [], "noms": [], "a_trier_vieux": [], "telechargements_vieux": [],
+            "total": 0, "vrac_info": loose, "noms_info": names}
 
 
 if __name__ == "__main__":
@@ -84,5 +67,4 @@ if __name__ == "__main__":
     tmp = OUTPUT + ".tmp"
     json.dump(state, open(tmp, "w"), ensure_ascii=False, indent=1)
     os.replace(tmp, OUTPUT)
-    print(f"{state['total']} file(s) to review: {len(state['vrac'])} loose, {len(state['noms'])} badly named, {len(state['a_trier_vieux'])} in À trier "
-          f"and {len(state['telechargements_vieux'])} in Downloads for more than 7 days")
+    print(f"nothing to do by hand; for the record: {len(state['vrac_info'])} loose, {len(state['noms_info'])} with a name outside the convention")
