@@ -113,6 +113,7 @@ for d in (code, data, fake, home / "Library/Logs", icloud / "00 À trier", iclou
     d.mkdir(parents=True, exist_ok=True)
 for f in ("sort.py", "activity.py"):
     shutil.copy(HERE / f, code / f)
+shutil.copytree(HERE / "sorter", code / "sorter")
 for example, real in (("settings.example.json", "settings.json"), ("convention.example.md", "convention.md"), ("rules.example.md", "rules.md")):
     shutil.copy(HERE / example, code / real)
 (fake / "claude").write_text(f"""#!{sys.executable}
@@ -568,12 +569,7 @@ check("bilan: each document of the theme folders with what becomes of it, from r
 check("bilan: never the photos, the archive, the root, a code project nor the inboxes; the totals in one line",
       not {name for docs in found.values() for name in docs} & set(never)
       and end == "29 document(s), 7 kept, 16 to archive, 5 to trash, 1 not read yet (FILE_SORTER_CLEANUP=trial)")
-source = (code / "sort.py").read_text(encoding="utf-8")
-try:   # short lines: a folder goes on in the next one
-    (code / "sort.py").write_text(source.replace("REVIEW_BILAN_LINE = 16000", "REVIEW_BILAN_LINE = 500"), encoding="utf-8")
-    p = bilan_again()
-finally:
-    (code / "sort.py").write_text(source, encoding="utf-8")
+p = bilan_again(FILE_SORTER_REVIEW_BILAN_LINE="500")   # short lines: a folder goes on in the next one
 split, parts, end2 = bilan(p.stdout)
 check("bilan: past its length a line goes on in the next one, a folder split too, each part numbered; the same bilan put together",
       p.returncode == 0 and split == found and end2 == end and len(parts) > 4 and all(x[2] <= 510 for x in parts)
