@@ -52,10 +52,14 @@ def kept_why(conf, answer):
 def filed(name, origin, target, answer, ai, how):
     """Build 'rangé' (and optional 'renommé') activity events for a filed document."""
     reason = str(answer.get("raison") or "").strip().rstrip(".")
-    events = [("rangé", name, {"src": origin, "dst": target, "detail": " ; ".join(x for x in (reason, how) if x), **ai})]
+    events = [
+        ("rangé", name, {"src": origin, "dst": target, "detail": " ; ".join(x for x in (reason, how) if x), **ai})
+    ]
     new_name = target.rsplit("/", 1)[-1]
     if nfc(new_name) != nfc(name):
-        events.append(("renommé", name, {"src": name, "dst": new_name, "detail": "nom refait selon la convention", **ai}))
+        events.append(
+            ("renommé", name, {"src": name, "dst": new_name, "detail": "nom refait selon la convention", **ai})
+        )
     return events
 
 
@@ -68,16 +72,18 @@ def downloads_events(entries):
             if entry["id"] in logged:
                 continue
             logged[entry["id"]] = time.time()
-            events.append((
-                entry["action"],
-                entry["nom"],
-                {
-                    "src": "Mac · Téléchargements",
-                    "dst": entry.get("vers") or "Téléchargements",
-                    "detail": entry.get("detail") or "",
-                },
-            ))
-        except (KeyError, TypeError):
+            events.append(
+                (
+                    entry["action"],
+                    entry["nom"],
+                    {
+                        "src": "Mac · Téléchargements",
+                        "dst": entry.get("vers") or "Téléchargements",
+                        "detail": entry.get("detail") or "",
+                    },
+                )
+            )
+        except KeyError, TypeError:
             continue
     if events:
         write_json(DOWNLOADS_LOGGED, logged)
@@ -126,7 +132,11 @@ def _mac_event(action, status):
         )
         return "annulé", obj, {**fields, "detail": detail}
     error = status.removeprefix("erreur : ")
-    return "échec", obj, {**fields, "detail": f"le Mac n'a pas pu {MAC_VERB.get(kind, 'appliquer la décision')} : {error}"}
+    return (
+        "échec",
+        obj,
+        {**fields, "detail": f"le Mac n'a pas pu {MAC_VERB.get(kind, 'appliquer la décision')} : {error}"},
+    )
 
 
 def public_reason(exc, step):

@@ -1,6 +1,5 @@
 """Execution modes: full Mac sorting, server --decide, Mac --apply, and --deposit."""
 
-from datetime import datetime
 import fcntl
 import hashlib
 import os
@@ -9,9 +8,9 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 
-import activity
-
+from sorter import activity
 from sorter.config import (
     APPLIED,
     ATTACH_INBOX,
@@ -79,7 +78,7 @@ DOWNLOADS_SEEN = os.path.join(DATA, "downloads.json")
 
 def audit():
     """Run tidiness audit for the Dashboard (no AI, names and dates only)."""
-    subprocess.run([sys.executable, "-I", os.path.join(HERE, "audit.py")], capture_output=True, timeout=300)
+    subprocess.run([sys.executable, "-I", os.path.join(HERE, "sorter", "audit.py")], capture_output=True, timeout=300)
 
 
 def batch(files, moved, kept):
@@ -96,7 +95,9 @@ def batch(files, moved, kept):
                 save_kept(target)
             elif not DRY:
                 save_kept(src)
-            log(f"GARDÉ   {name}  (confidence {conf:.2f}, proposed: {answer.get('destination')}) — {answer.get('raison')}")
+            log(
+                f"GARDÉ   {name}  (confidence {conf:.2f}, proposed: {answer.get('destination')}) — {answer.get('raison')}"
+            )
             continue
         base = DRIVE if name.lower().endswith(OFFICE) else ICLOUD
         target = unique(os.path.join(base, dest, new))
@@ -122,7 +123,10 @@ def main():
         moved, kept = [], []
         done = set()
         while True:
-            files = pending((DOWNLOADS, GMAIL_INBOX, DRIVE_INBOX) + CHROME_INBOXES + (DRIVE, INBOX, ATTACH_INBOX), skip=lambda p: p in done)
+            files = pending(
+                (DOWNLOADS, GMAIL_INBOX, DRIVE_INBOX) + CHROME_INBOXES + (DRIVE, INBOX, ATTACH_INBOX),
+                skip=lambda p: p in done,
+            )
             if not files:
                 break
             done.update(files)
@@ -191,15 +195,19 @@ def decide():
                 came(action)
             elif action.get("type") in REVIEW_KINDS and CLEANUP != "on":
                 withdrawn[action["id"]] = {"action": action, "time": time.time()}
-                later.append((
-                    "annulé",
-                    os.path.basename(action["source"]["chemin"]),
-                    {
-                        "src": place(action["source"]["racine"], os.path.dirname(action["source"]["chemin"])),
-                        "detail": f"relecture {'arrêtée' if CLEANUP == 'off' else 'revenue à son essai'} : retiré du plan, le Mac ne le fera pas",
-                    },
-                ))
-                log(f"review: {action['type']} {action['source']['chemin']} withdrawn from the Mac's plan (FILE_SORTER_CLEANUP={CLEANUP})")
+                later.append(
+                    (
+                        "annulé",
+                        os.path.basename(action["source"]["chemin"]),
+                        {
+                            "src": place(action["source"]["racine"], os.path.dirname(action["source"]["chemin"])),
+                            "detail": f"relecture {'arrêtée' if CLEANUP == 'off' else 'revenue à son essai'} : retiré du plan, le Mac ne le fera pas",
+                        },
+                    )
+                )
+                log(
+                    f"review: {action['type']} {action['source']['chemin']} withdrawn from the Mac's plan (FILE_SORTER_CLEANUP={CLEANUP})"
+                )
             elif time.time() - action.get("cree_le", 0) < 7 * 86400:
                 actions.append(action)
                 withdrawn.pop(action["id"], None)
@@ -213,7 +221,10 @@ def decide():
 
         if came_back:
             errors = sum(status not in MAC_FINE for status in came_back)
-            REPORT.set("icloud", *(("failed", f"le Mac n'a pas pu appliquer {errors} action(s) du plan") if errors else ("ok",)))
+            REPORT.set(
+                "icloud",
+                *(("failed", f"le Mac n'a pas pu appliquer {errors} action(s) du plan") if errors else ("ok",)),
+            )
         elif not actions:
             REPORT.set("icloud", "skipped")
 
@@ -222,7 +233,9 @@ def decide():
             (GMAIL_INBOX, DRIVE_INBOX) + CHROME_INBOXES + (DRIVE, INBOX, ATTACH_INBOX),
             skip=lambda p: "|".join(relative(p)) in planned,
         )
-        server_side = lambda p: bool(DRIVE_RCLONE) and os.path.dirname(p) in DRIVE_INBOXES
+
+        def server_side(p):
+            return bool(DRIVE_RCLONE) and os.path.dirname(p) in DRIVE_INBOXES
 
         def by_server(path, what, act):
             REPORT.running("drive")
@@ -262,7 +275,10 @@ def decide():
                 if by_server(
                     path,
                     "doublon",
-                    lambda p=path: rclone("deletefile", "--drive-use-trash", DRIVE_RCLONE + os.path.relpath(p, DRIVE)) or "corbeille du Drive",
+                    lambda p=path: (
+                        rclone("deletefile", "--drive-use-trash", DRIVE_RCLONE + os.path.relpath(p, DRIVE))
+                        or "corbeille du Drive"
+                    ),
                 ):
                     log(f"DOUBLON {name}  (identical to {orig}) -> the Drive's trash, by the server")
                     activity.log(
@@ -275,15 +291,17 @@ def decide():
             else:
                 actions.append(make_action("doublon", path, original=nfc(orig)))
                 log(f"DOUBLON {name}  (identical to {orig}) -> Trash, by the Mac")
-                later.append((
-                    "doublon",
-                    name,
-                    {
-                        "src": where(os.path.dirname(path)),
-                        "dst": "Corbeille du Mac",
-                        "detail": f"identique à {twin(orig)} : le Mac le met à la Corbeille à son prochain passage",
-                    },
-                ))
+                later.append(
+                    (
+                        "doublon",
+                        name,
+                        {
+                            "src": where(os.path.dirname(path)),
+                            "dst": "Corbeille du Mac",
+                            "detail": f"identique à {twin(orig)} : le Mac le met à la Corbeille à son prochain passage",
+                        },
+                    )
+                )
 
         if not files:
             REPORT.set("decide", "skipped")
@@ -293,7 +311,10 @@ def decide():
             REPORT.set(
                 "decide",
                 *(
-                    ("failed", f"le modèle local n'a pas répondu pour {waiting} fichier(s) : nouvel essai au prochain passage")
+                    (
+                        "failed",
+                        f"le modèle local n'a pas répondu pour {waiting} fichier(s) : nouvel essai au prochain passage",
+                    )
                     if waiting
                     else ("ok",)
                 ),
@@ -306,28 +327,52 @@ def decide():
                     why = kept_why(conf, answer)
                     if os.path.dirname(src) in (GMAIL_INBOX,) + CHROME_INBOXES + (DRIVE,):
                         if server_side(src):
-                            moved = by_server(src, "vers 00 À trier", lambda s=src, n=name: drive_move(s, os.path.relpath(DRIVE_INBOX, DRIVE), n))
+                            moved = by_server(
+                                src,
+                                "vers 00 À trier",
+                                lambda s=src, n=name: drive_move(s, os.path.relpath(DRIVE_INBOX, DRIVE), n),
+                            )
                             if not moved:
                                 continue
-                            activity.log("à trier", name, src=origin, dst=place("drive", moved), detail=f"{why} ; mis dans 00 À trier par le serveur", **ai)
-                        else:
-                            actions.append(make_action("vers_a_trier", src))
-                            later.append((
+                            activity.log(
                                 "à trier",
                                 name,
-                                {"src": origin, "dst": where(DRIVE_INBOX), "detail": f"{why} ; le Mac le met dans 00 À trier à son prochain passage", **ai},
-                            ))
+                                src=origin,
+                                dst=place("drive", moved),
+                                detail=f"{why} ; mis dans 00 À trier par le serveur",
+                                **ai,
+                            )
+                        else:
+                            actions.append(make_action("vers_a_trier", src))
+                            later.append(
+                                (
+                                    "à trier",
+                                    name,
+                                    {
+                                        "src": origin,
+                                        "dst": where(DRIVE_INBOX),
+                                        "detail": f"{why} ; le Mac le met dans 00 À trier à son prochain passage",
+                                        **ai,
+                                    },
+                                )
+                            )
                     else:
                         activity.log("gardé", name, src=origin, detail=why, **ai)
                     save_kept(src, signature)
-                    log(f"GARDÉ   {name}  (confidence {conf:.2f}, proposed: {answer.get('destination')}) — {answer.get('raison')}")
+                    log(
+                        f"GARDÉ   {name}  (confidence {conf:.2f}, proposed: {answer.get('destination')}) — {answer.get('raison')}"
+                    )
                     continue
                 base = "drive" if name.lower().endswith(OFFICE) else "icloud"
                 if base == "drive" and server_side(src):
                     target = by_server(src, "rangement", lambda s=src, d=dest, n=new: drive_move(s, d, n))
                     if target:
-                        log(f"RANGÉ   {name}  ->  Drive/{target}  ({conf:.2f}) — {answer.get('raison')} (by the server)")
-                        for act_name, obj, fields in filed(name, origin, place("drive", target), answer, ai, "rangé par le serveur dans le Drive"):
+                        log(
+                            f"RANGÉ   {name}  ->  Drive/{target}  ({conf:.2f}) — {answer.get('raison')} (by the server)"
+                        )
+                        for act_name, obj, fields in filed(
+                            name, origin, place("drive", target), answer, ai, "rangé par le serveur dans le Drive"
+                        ):
                             activity.log(act_name, obj, **fields)
                     continue
                 actions.append(
@@ -341,7 +386,14 @@ def decide():
                 )
                 prefix = "Drive/" if base == "drive" else ""
                 log(f"PLAN    {name}  ->  {prefix}{os.path.join(dest, new)}  ({conf:.2f}) — {answer.get('raison')}")
-                later += filed(name, origin, place(base, nfc(os.path.join(dest, new))), answer, ai, "le Mac le range à son prochain passage")
+                later += filed(
+                    name,
+                    origin,
+                    place(base, nfc(os.path.join(dest, new))),
+                    answer,
+                    ai,
+                    "le Mac le range à son prochain passage",
+                )
 
         if review:
             try:
@@ -362,8 +414,12 @@ def decide():
             except Exception as exc:
                 review.state["pause_until"] = time.time() + REVIEW_PAUSE
                 log(f"ERREUR  review: {type(exc).__name__} {exc}")
-                REPORT.set("decide", "failed", f"relecture des dossiers en pause une heure : erreur {type(exc).__name__}")
-                activity.log("échec", "relecture des dossiers", detail=f"en pause une heure : {type(exc).__name__} : {exc}")
+                REPORT.set(
+                    "decide", "failed", f"relecture des dossiers en pause une heure : erreur {type(exc).__name__}"
+                )
+                activity.log(
+                    "échec", "relecture des dossiers", detail=f"en pause une heure : {type(exc).__name__} : {exc}"
+                )
 
         REPORT.set(
             "drive",
@@ -406,7 +462,9 @@ def decide():
 
 def prune(folder, base):
     """Remove folders emptied by archiving or deletion (never top-level or level-2 theme folders)."""
-    while len(nfc(os.path.relpath(folder, base)).split(os.sep)) > 2 and not os.path.relpath(folder, base).startswith(".."):
+    while len(nfc(os.path.relpath(folder, base)).split(os.sep)) > 2 and not os.path.relpath(folder, base).startswith(
+        ".."
+    ):
         try:
             if [f for f in os.listdir(folder) if f != ".DS_Store"]:
                 return
@@ -449,7 +507,9 @@ def apply_action(action, moved, kept):
             raise ValueError("source hors des dossiers par thèmes")
         if any(b in "/" + "/".join(top[:-1]) for b in tuple(SETTINGS.get("paquets") or ()) + (PHOTOS,)):
             raise ValueError("source dans un dossier que la relecture ne touche pas")
-    elif nfc(os.path.dirname(src)) not in tuple(nfc(x) for x in (INBOX, GMAIL_INBOX, DRIVE_INBOX, ATTACH_INBOX) + CHROME_INBOXES + (DRIVE,)):
+    elif nfc(os.path.dirname(src)) not in tuple(
+        nfc(x) for x in (INBOX, GMAIL_INBOX, DRIVE_INBOX, ATTACH_INBOX) + CHROME_INBOXES + (DRIVE,)
+    ):
         raise ValueError("source hors des boîtes d'arrivée")
 
     if not os.path.exists(src):
@@ -476,19 +536,29 @@ def apply_action(action, moved, kept):
         dest = os.path.dirname(action["cible"]["chemin"])
         moved.append(f"{os.path.basename(target)} → {dest}")
         prefix = "Drive/" if action["cible"]["racine"] == "drive" else ""
-        log(f"RANGÉ   {name}  ->  {prefix}{os.path.relpath(target, roots[action['cible']['racine']])}  ({action.get('confiance', 0):.2f}) — {action.get('raison', '')}")
+        log(
+            f"RANGÉ   {name}  ->  {prefix}{os.path.relpath(target, roots[action['cible']['racine']])}  ({action.get('confiance', 0):.2f}) — {action.get('raison', '')}"
+        )
     elif action["type"] == "archiver":
-        if action["cible"]["racine"] != action["source"]["racine"] or not is_archive(nfc(action["cible"]["chemin"]).split("/")[0]):
+        if action["cible"]["racine"] != action["source"]["racine"] or not is_archive(
+            nfc(action["cible"]["chemin"]).split("/")[0]
+        ):
             raise ValueError("destination hors des archives")
         target = unique(resolve(action["cible"]))
         os.makedirs(os.path.dirname(target), exist_ok=True)
         shutil.move(src, target)
         prune(os.path.dirname(src), roots[action["source"]["racine"]])
         prefix = "Drive/" if action["cible"]["racine"] == "drive" else ""
-        log(f"ARCHIVÉ {name}  ->  {prefix}{os.path.relpath(target, roots[action['cible']['racine']])} — {action.get('raison', '')}")
+        log(
+            f"ARCHIVÉ {name}  ->  {prefix}{os.path.relpath(target, roots[action['cible']['racine']])} — {action.get('raison', '')}"
+        )
     elif action["type"] == "supprimer":
         if action["source"]["racine"] in REVIEW_NO_TRASH:
-            msg = "rien n'est mis à la corbeille dans le Drive" if action["source"]["racine"] == "drive" else "rien n'est mis à la corbeille par la relecture"
+            msg = (
+                "rien n'est mis à la corbeille dans le Drive"
+                if action["source"]["racine"] == "drive"
+                else "rien n'est mis à la corbeille par la relecture"
+            )
             raise ValueError(msg)
         kept_copy = action.get("garde")
         if kept_copy and not any(
@@ -507,16 +577,18 @@ def apply_action(action, moved, kept):
 def note_download(action, name, size, dest, detail=""):
     seen = [x for x in read_json(DOWNLOADS_SEEN, []) if time.time() - x.get("t", 0) < 7 * 86400]
     when = datetime.now().isoformat(timespec="seconds")
-    seen.append({
-        "id": hashlib.sha1(f"{name}|{size}|{when}".encode()).hexdigest()[:16],
-        "t": time.time(),
-        "quand": when,
-        "action": action,
-        "nom": name,
-        "taille": size,
-        "vers": dest,
-        "detail": detail,
-    })
+    seen.append(
+        {
+            "id": hashlib.sha1(f"{name}|{size}|{when}".encode()).hexdigest()[:16],
+            "t": time.time(),
+            "quand": when,
+            "action": action,
+            "nom": name,
+            "taille": size,
+            "vers": dest,
+            "detail": detail,
+        }
+    )
     write_json(DOWNLOADS_SEEN, seen[-300:])
 
 
@@ -534,7 +606,13 @@ def move_downloads():
         if not name.lower().endswith(DOCUMENTS):
             save_kept(path)
             log(f"LAISSÉ  {name}  (not a document) left in Downloads")
-            note_download("laissé", name, st.st_size, "Téléchargements", "pas un document : installeur, archive, vidéo… gardé dans Téléchargements")
+            note_download(
+                "laissé",
+                name,
+                st.st_size,
+                "Téléchargements",
+                "pas un document : installeur, archive, vidéo… gardé dans Téléchargements",
+            )
             continue
         if st.st_size > MAX_SIZE:
             save_kept(path)
@@ -552,7 +630,13 @@ def move_downloads():
         target = unique(os.path.join(DRIVE_INBOX, name))
         shutil.move(path, target)
         log(f"VERSÉ   {name}  -> Drive/00 À trier")
-        note_download("versé", name, st.st_size, where(target), "téléchargement du Mac versé dans la boîte du Drive, que le serveur trie")
+        note_download(
+            "versé",
+            name,
+            st.st_size,
+            where(target),
+            "téléchargement du Mac versé dans la boîte du Drive, que le serveur trie",
+        )
 
 
 def apply_plan():
@@ -611,14 +695,16 @@ def deposit():
         target = {"racine": root, "chemin": nfc(rel)}
         ident = hashlib.sha1(f"deposer|{root}|{rel}|{content}".encode()).hexdigest()[:16]
         if all(a["id"] != ident for a in plan["actions"]):
-            plan["actions"].append({
-                "id": ident,
-                "type": "deposer",
-                "source": target,
-                "cible": target,
-                "contenu": content,
-                "cree_le": time.time(),
-            })
+            plan["actions"].append(
+                {
+                    "id": ident,
+                    "type": "deposer",
+                    "source": target,
+                    "cible": target,
+                    "contenu": content,
+                    "cree_le": time.time(),
+                }
+            )
             write_json(PLAN, plan)
     log(f"À DÉPOSER {rel} ({len(content)} characters): the Mac will write it on its next pass")
 
@@ -629,5 +715,7 @@ def run_cli():
         args = args[: args.index("--deposit") + 1] + args[args.index("--deposit") + 4 :]
     unknown = [a for a in args if a not in ("--dry-run", "--decide", "--apply", "--deposit")]
     if unknown:
-        sys.exit(f"unknown argument {unknown[0]}: sort.py [--dry-run] | --decide | --apply | --deposit <icloud|drive> <path> <file>")
+        sys.exit(
+            f"unknown argument {unknown[0]}: sort.py [--dry-run] | --decide | --apply | --deposit <icloud|drive> <path> <file>"
+        )
     {"decide": decide, "apply": apply_plan, "deposit": deposit}.get(ROLE, main)()

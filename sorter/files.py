@@ -151,8 +151,7 @@ def extract(path):
                     if re.match(r"(ppt/slides/slide\d+|xl/sharedStrings|word/document|content)\.xml$", name)
                 ]
                 text = " ".join(
-                    re.sub(r"<[^>]+>", " ", zf.read(name).decode("utf-8", "replace"))
-                    for name in sorted(parts)[:30]
+                    re.sub(r"<[^>]+>", " ", zf.read(name).decode("utf-8", "replace")) for name in sorted(parts)[:30]
                 )
         elif ext in TEXTUTIL_EXT and MAC:
             text = subprocess.run(
@@ -246,7 +245,9 @@ def dedupe(files):
             if ROLE == "full" and not DRY:
                 to_trash(path)
             if ROLE != "decide":
-                log(f"DOUBLON {os.path.basename(path)}  (identical to {os.path.relpath(known[digest], ICLOUD)}) -> Trash")
+                log(
+                    f"DOUBLON {os.path.basename(path)}  (identical to {os.path.relpath(known[digest], ICLOUD)}) -> Trash"
+                )
         else:
             known[digest] = path
             keep.append(path)

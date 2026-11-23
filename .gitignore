@@ -33,4 +33,5 @@ donnees/
 *.tmp
 .*.relay
 __pycache__/
+.ruff_cache/
 .DS_Store

@@ -11,16 +11,13 @@ import unicodedata
 import urllib.error
 import urllib.request
 
-import activity
-
+from sorter import activity
 from sorter.config import (
     AGY,
-    AGY_AI,
     AGY_MODEL,
     ATTACH_INBOX,
     CHROME_INBOXES,
     CLAUDE,
-    CLAUDE_AI,
     CLOUD_AI,
     CONVENTION,
     DOWNLOADS,
@@ -95,7 +92,9 @@ class Unread(str):
 
 def unread(path):
     ext = os.path.splitext(path)[1].lower() or "sans extension"
-    return Unread(f"Contenu illisible (format {ext}) : décide d'après le nom du fichier, sa date et les autres fichiers du dossier.")
+    return Unread(
+        f"Contenu illisible (format {ext}) : décide d'après le nom du fichier, sa date et les autres fichiers du dossier."
+    )
 
 
 def text_block(path, txt):
@@ -111,10 +110,10 @@ def prompt(tree, blocks, local=False):
         if local
         else '- "confiance" entre 0 et 1. Si tu n\'es pas sûr, mets moins de 0.7 : le fichier restera dans "00 À trier".'
     )
-    return f"""Tu ranges les documents personnels de {SETTINGS['proprietaire']} dans son iCloud Drive.
+    return f"""Tu ranges les documents personnels de {SETTINGS["proprietaire"]} dans son iCloud Drive.
 
 Dossiers existants (chemins relatifs, à réutiliser tels quels) :
-{chr(10).join('- ' + f for f in tree)}
+{chr(10).join("- " + f for f in tree)}
 
 Règles :
 - "destination" = un dossier de la liste ci-dessus. Tu peux ajouter UN niveau de sous-dossier sous un dossier existant si c'est clairement utile (ex. "50 Travail/Auto-entrepreneur/Factures 2026/T4" pour une facture d'octobre 2026 ; trimestres T1=jan-mars, T2=avr-juin, T3=juil-sept, T4=oct-déc).
@@ -149,7 +148,7 @@ def claude_error(res):
         text = " : ".join(str(data[k]) for k in ("api_error", "result") if data.get(k))
         if text:
             return text
-    except (ValueError, TypeError, AttributeError):
+    except ValueError, TypeError, AttributeError:
         pass
     return (res.stderr[-500:] or res.stdout[-500:]).strip()
 
@@ -174,14 +173,22 @@ def _build_cloud_blocks(items, question):
         if txt:
             blocks.append(text_block(path, txt))
         elif os.path.splitext(path)[1].lower() in (".heic", ".heif", ".tiff"):
-            jpg = os.path.join(PREVIEWS, hashlib.sha1(path.encode()).hexdigest()[:8] + "-" + re.sub(r"\W", "_", name) + ".jpg")
+            jpg = os.path.join(
+                PREVIEWS, hashlib.sha1(path.encode()).hexdigest()[:8] + "-" + re.sub(r"\W", "_", name) + ".jpg"
+            )
             jpeg_preview(path, jpg)
             blocks.append(f"### {name}\nImage : lis l'aperçu JPEG avec l'outil Read à ce chemin exact : {jpg}")
         else:
-            readable = path if os.path.dirname(path) in question.dirs else os.path.join(PREVIEWS, hashlib.sha1(path.encode()).hexdigest()[:8] + "-" + name)
+            readable = (
+                path
+                if os.path.dirname(path) in question.dirs
+                else os.path.join(PREVIEWS, hashlib.sha1(path.encode()).hexdigest()[:8] + "-" + name)
+            )
             if readable != path:
                 shutil.copy(path, readable)
-            blocks.append(f"### {name}\nPas de texte extractible : lis-le avec l'outil Read à ce chemin exact : {readable}{question.read_hint}")
+            blocks.append(
+                f"### {name}\nPas de texte extractible : lis-le avec l'outil Read à ce chemin exact : {readable}{question.read_hint}"
+            )
     return blocks
 
 
@@ -190,12 +197,25 @@ def ask_antigravity(items, question):
     blocks = _build_cloud_blocks(items, question)
     dirs = [arg for d in question.dirs if os.path.isdir(d) for arg in ("--add-dir", d)]
     cmd = [
-        AGY, "-p", question.prompt(blocks), "--model", AGY_MODEL, "--mode", "plan",
-        "--output-format", "json", "--json-schema", json.dumps(question.schema),
-        "--disable-slash-commands", "--dangerously-skip-permissions", *dirs,
+        AGY,
+        "-p",
+        question.prompt(blocks),
+        "--model",
+        AGY_MODEL,
+        "--mode",
+        "plan",
+        "--output-format",
+        "json",
+        "--json-schema",
+        json.dumps(question.schema),
+        "--disable-slash-commands",
+        "--dangerously-skip-permissions",
+        *dirs,
     ]
     env = dict(os.environ, PATH=f"{os.path.dirname(AGY)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=900, cwd=tempfile.gettempdir(), env=env, stdin=subprocess.DEVNULL)
+    res = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=900, cwd=tempfile.gettempdir(), env=env, stdin=subprocess.DEVNULL
+    )
     if res.returncode != 0:
         raise RuntimeError(f"antigravity failed ({res.returncode}): {claude_error(res)}")
     data = json.loads(res.stdout)
@@ -210,9 +230,24 @@ def ask_claude(items, question):
     blocks = _build_cloud_blocks(items, question)
     dirs = [arg for d in question.dirs if os.path.isdir(d) for arg in ("--add-dir", d)]
     cmd = [
-        CLAUDE, "-p", question.prompt(blocks), "--model", MODEL, "--output-format", "json",
-        "--json-schema", json.dumps(question.schema), "--tools", "Read", "--allowedTools", "Read",
-        *dirs, "--strict-mcp-config", "--setting-sources", "project", "--no-session-persistence",
+        CLAUDE,
+        "-p",
+        question.prompt(blocks),
+        "--model",
+        MODEL,
+        "--output-format",
+        "json",
+        "--json-schema",
+        json.dumps(question.schema),
+        "--tools",
+        "Read",
+        "--allowedTools",
+        "Read",
+        *dirs,
+        "--strict-mcp-config",
+        "--setting-sources",
+        "project",
+        "--no-session-persistence",
     ]
     env = dict(os.environ, PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=900, cwd=tempfile.gettempdir(), env=env)
@@ -296,15 +331,16 @@ def ask_local(items, question, tag=None):
         log(f"{tag}local model unreachable: {type(exc).__name__} {str(exc)[:150]}")
         return {}, {p: f"injoignable, {type(exc).__name__}" for p, _ in items}, []
 
-    room = lambda n: LOCAL_CONTEXT - LOCAL_MARGIN - LOCAL_ANSWER * n - 100
+    def room(n):
+        return LOCAL_CONTEXT - LOCAL_MARGIN - LOCAL_ANSWER * n - 100
+
     queue, current = [], []
     for path, _ in items:
         if fixed + sizes[path] > room(1):
             missing[path] = f"trop long pour un créneau, {fixed + sizes[path]} tokens"
             continue
         if current and (
-            len(current) == LOCAL_FILES
-            or fixed + sum(sizes[x] for x in current) + sizes[path] > room(len(current) + 1)
+            len(current) == LOCAL_FILES or fixed + sum(sizes[x] for x in current) + sizes[path] > room(len(current) + 1)
         ):
             queue.append(current)
             current = []
@@ -320,7 +356,9 @@ def ask_local(items, question, tag=None):
             "temperature": 0,
             "max_tokens": LOCAL_ANSWER * len(current) + 100,
             "chat_template_kwargs": {"enable_thinking": False},
-            "messages": [{"role": "user", "content": question.prompt([text_block(p, texts[p]) for p in current], True)}],
+            "messages": [
+                {"role": "user", "content": question.prompt([text_block(p, texts[p]) for p in current], True)}
+            ],
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {"name": "fichiers", "schema": local_schema(names, question.item), "strict": True},
@@ -346,17 +384,23 @@ def ask_local(items, question, tag=None):
         except OSError as exc:
             remaining = current + [x for grp in queue for x in grp]
             missing.update({p: f"injoignable, {type(exc).__name__}" for p in remaining})
-            log(f"{tag}local model unavailable: {type(exc).__name__} {str(exc)[:150]}, {len(remaining)} file(s) without its answer")
+            log(
+                f"{tag}local model unavailable: {type(exc).__name__} {str(exc)[:150]}, {len(remaining)} file(s) without its answer"
+            )
             break
         except Exception as exc:
             missing.update({p: f"réponse illisible, {type(exc).__name__}" for p in current})
-            log(f"{tag}local model's answer unreadable for {len(current)} file(s): {type(exc).__name__} {str(exc)[:150]}")
+            log(
+                f"{tag}local model's answer unreadable for {len(current)} file(s): {type(exc).__name__} {str(exc)[:150]}"
+            )
             continue
         answers.update(found)
         groups.append(current)
         missing.update({p: "absent de sa réponse" for p in current if p not in found})
         prompt_tokens = (resp.get("usage") or {}).get("prompt_tokens")
-        log(f"{tag}local model {LOCAL_MODEL}: {len(found)} of {len(current)} file(s) answered, {prompt_tokens} prompt tokens")
+        log(
+            f"{tag}local model {LOCAL_MODEL}: {len(found)} of {len(current)} file(s) answered, {prompt_tokens} prompt tokens"
+        )
     return answers, missing, groups
 
 
@@ -400,7 +444,9 @@ def compare(texts, claude, local, missing, tree):
             differ += 1
             log(f"shadow: {name}  {MODEL}={described(ref)}  local={described(loc)}")
     if same + differ + none:
-        log(f"shadow: {same + differ + none} file(s) with text compared: {same} the same, {differ} different, {none} without a local answer")
+        log(
+            f"shadow: {same + differ + none} file(s) with text compared: {same} the same, {differ} different, {none} without a local answer"
+        )
 
 
 def ask(items, question, shadow, tag=None):
@@ -432,13 +478,16 @@ def choose(files):
     if not failure:
         unanswered.update({p: (CLOUD_AI, None) for p, _ in to_claude if p not in claude})
     for path, (ai, why) in unanswered.items():
-        log(f"SANS RÉPONSE {os.path.basename(path)}  ({f'local model: {why}; ' if why else ''}retried on the next pass)")
+        log(
+            f"SANS RÉPONSE {os.path.basename(path)}  ({f'local model: {why}; ' if why else ''}retried on the next pass)"
+        )
         activity.log(
             "sans réponse",
             os.path.basename(path),
             src=where(os.path.dirname(path)),
             **ai,
-            detail=(f"pas de réponse du modèle local ({why})" if why else "le modèle n'a rien répondu pour ce fichier") + " : nouvel essai au prochain passage",
+            detail=(f"pas de réponse du modèle local ({why})" if why else "le modèle n'a rien répondu pour ce fichier")
+            + " : nouvel essai au prochain passage",
         )
     choices = [outcome(p, decided[p][0], tree) + (decided[p][1],) for p in files if p in decided]
     return choices, failure, sum(ai is LOCAL_AI for ai, _ in unanswered.values())

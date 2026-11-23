@@ -2,27 +2,29 @@
 """CLI entrypoint for file-sorter (inboxes sorting, Drive filing, and folder review).
 
 Implementation lives in the `sorter/` package:
-  - sorter/config.py   paths, settings, thresholds, text assets, and core helpers
-  - sorter/files.py    inbox discovery, extraction, deduplication, safe paths, plan actions
-  - sorter/drive.py    Google Drive write operations via rclone
-  - sorter/models.py   LLM prompts, strict JSON schemas, local/Claude routing, shadow compare
-  - sorter/journal.py  Dashboard activity events and French error formatting
-  - sorter/review.py   theme folder review state machine and bilan reporting
-  - sorter/runner.py   CLI modes (full Mac run, --decide, --apply, --deposit)
+  - sorter/activity.py    atomic JSONL activity journal and run-status step report
+  - sorter/config.py      paths, settings, thresholds, text assets, and core helpers
+  - sorter/files.py       inbox discovery, extraction, deduplication, safe paths, plan actions
+  - sorter/drive.py       Google Drive write operations via rclone
+  - sorter/models.py      LLM prompts, strict JSON schemas, local/cloud routing, shadow compare
+  - sorter/journal.py     Dashboard activity events and French error formatting
+  - sorter/review.py      theme folder review state machine and bilan reporting
+  - sorter/runner.py      CLI modes (full Mac run, --decide, --apply, --deposit)
+  - sorter/audit.py       read-only tidiness audit (`python3 -m sorter.audit`)
+  - sorter/rename.py      bulk renaming helper (`python3 -m sorter.rename`)
+  - sorter/apply_plan.py  standalone tidying plan applier (`python3 -m sorter.apply_plan`)
 """
 
 import os
-import re
 import sys
-import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from sorter.config import (  # noqa: E402, F401
-    ARCHIVES,
     ARCHIVE_NAME,
+    ARCHIVES,
     CLAUDE,
     CLEANUP,
     CONVENTION,
@@ -87,8 +89,8 @@ from sorter.journal import (  # noqa: E402, F401
 )
 from sorter.models import (  # noqa: E402, F401
     FILING_ITEM,
-    Question,
     SCHEMA,
+    Question,
     Unread,
     ask,
     ask_claude,

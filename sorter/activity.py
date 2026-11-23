@@ -13,20 +13,24 @@ Step report (run-status.json): {"time": the start of the run, "steps": {"<workfl
 Neither ever raises: a journal or a report that cannot be written must not stop the sorting (the error is printed once, to the
 service's journal).
 """
-import datetime, json, os, sys
 
-PATH = None   # the journal; None: nothing is written
+import datetime
+import json
+import os
+import sys
+
+PATH = None  # the journal; None: nothing is written
 MAX_BYTES, KEEP_DAYS, KEEP_LINES = 5_000_000, 90, 20_000
 LIMITS = {"object": 300, "from": 300, "to": 300, "detail": 1000}
-rotated = False   # once per run: 20,000 long lines may stay above 5 MB, and rewriting the file at every event would be wasteful
-complained = set()   # writes that failed and were already reported
+rotated = False  # once per run: 20,000 long lines may stay above 5 MB, and rewriting the file at every event would be wasteful
+complained = set()  # writes that failed and were already reported
 
 
 def now():
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-RUN = now()   # the start of this run: the "run" of its events, the "time" of its report
+RUN = now()  # the start of this run: the "run" of its events, the "time" of its report
 
 
 def complain(what, e):
@@ -45,14 +49,16 @@ def log(action, obj, src=None, dst=None, **fields):
         ev["run"] = ev.get("run") or RUN
         ev = {k: v for k, v in ev.items() if v not in (None, "", [])}
         if isinstance(ev.get("detail"), str):
-            ev["detail"] = " ".join(ev["detail"].split())   # an error's output on one line
+            ev["detail"] = " ".join(ev["detail"].split())  # an error's output on one line
         for k, n in LIMITS.items():
             if isinstance(ev.get(k), str):
                 ev[k] = ev[k][:n]
         if "confidence" in ev:
             ev["confidence"] = round(min(1.0, max(0.0, float(ev["confidence"]))), 3)
         line = json.dumps(ev, ensure_ascii=False)
-        for c in "\x85  ":   # line breaks for some readers (str.splitlines): escaped, the JSON value stays the same
+        for c in (
+            "\x85\u2028\u2029"
+        ):  # line breaks for some readers (str.splitlines): escaped, the JSON value stays the same
             line = line.replace(c, f"\\u{ord(c):04x}")
         fd = os.open(PATH, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
@@ -76,7 +82,7 @@ def rotate():
             try:
                 if datetime.datetime.fromisoformat(json.loads(line)["time"]) >= since:
                     kept.append(line.rstrip("\n") + "\n")
-            except (ValueError, KeyError, TypeError):
+            except ValueError, KeyError, TypeError:
                 continue
     tmp = os.path.join(os.path.dirname(PATH), f".{os.path.basename(PATH)}.tmp")
     try:
@@ -89,7 +95,9 @@ def rotate():
 
 
 def _failing():
-    return os.path.join(os.path.dirname(PATH), f".{os.path.basename(PATH)}.failing")   # the start of a series of failed runs
+    return os.path.join(
+        os.path.dirname(PATH), f".{os.path.basename(PATH)}.failing"
+    )  # the start of a series of failed runs
 
 
 def failed(obj, detail):
@@ -149,7 +157,9 @@ class Report:
     def fail(self, message, step=None):
         """The step given, else the one running, else the first one without a state, fails with this message (French, no file name)."""
         step = step or self.current() or next((s for s in self.order if s not in self.steps), None)
-        self.steps = {s: v for s, v in self.steps.items() if v != "running" or s == step}   # what it left unfinished has no state
+        self.steps = {
+            s: v for s, v in self.steps.items() if v != "running" or s == step
+        }  # what it left unfinished has no state
         if step:
             self.set(step, "failed", message)
         else:

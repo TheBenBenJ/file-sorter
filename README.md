@@ -70,10 +70,10 @@ Plan actions (`plan.json`): `ranger` (file it at `cible`), `doublon` (to the Tra
 
 ### Package layout & other scripts
 
-- `sort.py` + `sorter/`: `sort.py` is the root CLI entrypoint (and re-exports helpers used by `rename.py`). Its implementation lives in the `sorter/` package (`config.py`, `files.py`, `drive.py`, `models.py`, `journal.py`, `review.py`, `runner.py`).
-- `audit.py`: no AI; writes `tidiness-state.json` for a dashboard. Since 22/11/2026 it asks for nothing by hand (`total` 0: what the sorting cannot place stays in `00 À trier` or `~/Downloads` on purpose); loose files and doubtful names are kept as `vrac_info` and `noms_info` for the record. `sort.py` runs it after each pass on the Mac.
-- `rename.py plan|apply|undo`: bulk renaming of existing documents according to `convention.md`. `plan` writes `data/rename-plan.json` and a `.tsv` to review, `apply` keeps an undo journal (`data/rename-undo.json`), `undo` restores the names.
-- `apply_plan.py verify|apply|undo`: applies a tidying plan (a JSON list of `move` and `trash` operations) after checks, with an undo journal in `data/` (`undo-tidy-<date>.json`).
+- `sort.py` + `sorter/`: `sort.py` is the root CLI entrypoint. Its implementation lives in the `sorter/` package (`activity.py`, `config.py`, `files.py`, `drive.py`, `models.py`, `journal.py`, `review.py`, `runner.py`).
+- `python3 -m sorter.audit`: no AI; writes `tidiness-state.json` for a dashboard. Since 22/11/2026 it asks for nothing by hand (`total` 0: what the sorting cannot place stays in `00 À trier` or `~/Downloads` on purpose); loose files and doubtful names are kept as `vrac_info` and `noms_info` for the record. `sort.py` runs it after each pass on the Mac.
+- `python3 -m sorter.rename plan|apply|undo`: bulk renaming of existing documents according to `convention.md`. `plan` writes `data/rename-plan.json` and a `.tsv` to review, `apply` keeps an undo journal (`data/rename-undo.json`), `undo` restores the names.
+- `python3 -m sorter.apply_plan verify|apply|undo`: applies a tidying plan (a JSON list of `move` and `trash` operations) after checks, with an undo journal in `data/` (`undo-tidy-<date>.json`).
 
 ## Setup
 
@@ -106,9 +106,9 @@ python3 sort.py --dry-run
 | `FILE_SORTER_CLEANUP` | the review of the theme folders (above): `trial` proposes, `on` archives and trashes, `off` stops it | `trial` |
 | `FILE_SORTER_REVIEW_PASS` | documents the review asks about per pass at most, several folders in a row, four and a half minutes at most (`1`: one folder a pass, as the tests run) | `120` |
 | `FILE_SORTER_NO_TRASH` | `1`: the review sends nothing of iCloud to the trash either, what it would trash goes into the archive (the home server's setting since 06/11/2026) | unset: iCloud's trash, never the Drive's |
-| `FILE_SORTER_MIN_AGE` | seconds a file must stay unchanged before it is handled (a trial; `tests.py` sets 0) | `60` |
+| `FILE_SORTER_MIN_AGE` | seconds a file must stay unchanged before it is handled (a trial; `tests/test_sorter.py` sets 0) | `60` |
 
-`rename.py` and `apply_plan.py` also read `ROOT` (another root, e.g. the Drive), and `rename.py` reads `SUFFIX` (separate plan files), `EXCLUDED` (folders to skip, separated by `|`) and `DOCS_ONLY` (rename documents only).
+`sorter/rename.py` and `sorter/apply_plan.py` also read `ROOT` (another root, e.g. the Drive), and `sorter/rename.py` reads `SUFFIX` (separate plan files), `EXCLUDED` (folders to skip, separated by `|`) and `DOCS_ONLY` (rename documents only).
 
 Scheduling: on the server, a timer runs `python3 -I sort.py --decide` with `FILE_SORTER_ICLOUD`, `FILE_SORTER_DRIVE` and `FILE_SORTER_DATA` pointing at the read-only mounts and a data folder; the personal files are copied next to the code. On the Mac, an agent fetches `plan.json` into this folder, runs `sort.py --apply` and sends `results.json` back. (The units and the relay live in a separate, private repo.)
 
@@ -116,7 +116,7 @@ The file names above are shared between the server, the Mac and a dashboard, and
 
 ## Operations and troubleshooting
 
-Checks after any change: `python3 -I tests.py` (offline: a sandbox with the example settings, a fake `claude`, a fake local model and a fake `rclone`; it also measures the local model's questions against its slot; the CI runs it too).
+Checks after any change: `python3 -I tests/test_sorter.py` (offline: a sandbox with the example settings, a fake `claude`, a fake local model and a fake `rclone`; it also measures the local model's questions against its slot; the CI runs it too).
 
 Activity journal and step report (`sort.py --decide` only: the server is their single writer; the Mac writes neither), for the System tab of the owner's dashboard, in `FILE_SORTER_DATA`:
 

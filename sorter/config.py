@@ -1,6 +1,6 @@
 """Configuration, paths, thresholds, text assets, and core helpers for file-sorter."""
 
-from datetime import datetime
+import atexit
 import json
 import os
 import re
@@ -9,14 +9,12 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
-import atexit
+from datetime import datetime
+
+from sorter import activity
 
 HOME = os.path.expanduser("~")
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
-
-import activity  # noqa: E402
 
 with open(os.path.join(HERE, "settings.json"), encoding="utf-8") as _f:
     SETTINGS = json.load(_f)
@@ -26,8 +24,9 @@ if MAC:
     # Allow launchd jobs to materialize cloud-only files on macOS (VFS_MATERIALIZE_DATALESS_FILES).
     try:
         import ctypes
+
         ctypes.CDLL("/usr/lib/libSystem.B.dylib").setiopolicy_np(3, 0, 2)
-    except (OSError, AttributeError):
+    except OSError, AttributeError:
         pass
 
 ROLE = (
@@ -72,11 +71,36 @@ EXTERNAL = (DOWNLOADS, GMAIL_INBOX) + CHROME_INBOXES + (DRIVE,)
 
 OFFICE = (".docx", ".doc", ".odt", ".xlsx", ".xls", ".ods", ".pptx", ".ppt", ".odp")
 DOCUMENTS = OFFICE + (
-    ".pdf", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff",
-    ".rtf", ".pages", ".numbers", ".key", ".txt", ".csv", ".md",
+    ".pdf",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".heic",
+    ".heif",
+    ".webp",
+    ".gif",
+    ".tif",
+    ".tiff",
+    ".rtf",
+    ".pages",
+    ".numbers",
+    ".key",
+    ".txt",
+    ".csv",
+    ".md",
 )
 ROOT_DOCUMENTS = OFFICE + (
-    ".pdf", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".rtf", ".pages", ".numbers", ".key",
+    ".pdf",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".heic",
+    ".heif",
+    ".webp",
+    ".rtf",
+    ".pages",
+    ".numbers",
+    ".key",
 )
 
 PREVIEWS = tempfile.mkdtemp(prefix="file-sorter-")
@@ -90,6 +114,7 @@ KEPT = os.path.join(DATA, "kept.json")
 PLAN = os.path.join(DATA, "plan.json")
 RESULTS = os.path.join(DATA, "results.json")
 APPLIED = os.path.join(DATA, "applied.json")
+
 
 def _default_agy():
     for candidate in ("/usr/local/bin/agy", os.path.join(HOME, ".local/bin/agy")):
@@ -128,18 +153,34 @@ REVIEW_KINDS = ("archiver", "supprimer")
 DECISIONS = ("garder", "archiver", "supprimer")
 REVIEW_LEAVE, REVIEW_TRASH = 0.7, 0.9
 REVIEW_NO_TRASH = ("icloud", "drive") if os.environ.get("FILE_SORTER_NO_TRASH") == "1" else ("drive",)
-KEPT_FROM_TRASH = (
-    lambda root: "rien n'est supprimé dans le Drive"
-    if root == "drive"
-    else "rien n'est supprimé, par précaution"
-)
+
+
+def kept_from_trash(root):
+    if root == "drive":
+        return "rien n'est supprimé dans le Drive"
+    return "rien n'est supprimé, par précaution"
+
+
 REVIEW_RULES = 7
 UNREAD_FORMAT = "format que la relecture ne lit pas"
 REVIEW_BILAN = "2026-11-06"
 REVIEW_BILAN_LINE = int(os.environ.get("FILE_SORTER_REVIEW_BILAN_LINE") or 16000)
 REVIEW_EXT = OFFICE + (
-    ".pdf", ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif", ".tif", ".tiff",
-    ".rtf", ".pages", ".numbers", ".key", ".txt",
+    ".pdf",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".heic",
+    ".heif",
+    ".webp",
+    ".gif",
+    ".tif",
+    ".tiff",
+    ".rtf",
+    ".pages",
+    ".numbers",
+    ".key",
+    ".txt",
 )
 REVIEW_VISUAL = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif")
 REVIEW_FILES = 10
@@ -165,12 +206,20 @@ ZIP_OFFICE_EXT = {".docx", ".pptx", ".xlsx", ".docm", ".xlsm", ".odt", ".ods", "
 TEXTUTIL_EXT = {".doc", ".rtf", ".pages"}
 VISION_EXT = {".jpg", ".jpeg", ".png", ".heic", ".webp", ".gif"}
 
-CONVENTION = open(os.path.join(HERE, "convention.md"), encoding="utf-8").read()
-RULES = open(os.path.join(HERE, "rules.md"), encoding="utf-8").read().strip()
+with open(os.path.join(HERE, "convention.md"), encoding="utf-8") as _f:
+    CONVENTION = _f.read()
+with open(os.path.join(HERE, "rules.md"), encoding="utf-8") as _f:
+    RULES = _f.read().strip()
 _review_owner_path = os.path.join(HERE, "review-rules.md")
-REVIEW_OWNER = open(_review_owner_path, encoding="utf-8").read().strip() if os.path.isfile(_review_owner_path) else ""
+if os.path.isfile(_review_owner_path):
+    with open(_review_owner_path, encoding="utf-8") as _f:
+        REVIEW_OWNER = _f.read().strip()
+else:
+    REVIEW_OWNER = ""
 
-nfc = lambda s: unicodedata.normalize("NFC", s)
+
+def nfc(text):
+    return unicodedata.normalize("NFC", text)
 
 
 def log(msg):
@@ -188,9 +237,12 @@ def notify(msg):
     subprocess.run(
         [
             "osascript",
-            "-e", "on run argv",
-            "-e", 'display notification (item 1 of argv) with title "Tri iCloud"',
-            "-e", "end run",
+            "-e",
+            "on run argv",
+            "-e",
+            'display notification (item 1 of argv) with title "Tri iCloud"',
+            "-e",
+            "end run",
             msg,
         ],
         check=False,
@@ -201,7 +253,7 @@ def read_json(path, default):
     try:
         with open(path, encoding="utf-8") as handle:
             return json.load(handle)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return default
 
 
@@ -221,8 +273,7 @@ def archive_of(base):
     """Return the existing top-level 'NN Archives' folder name under base, or ARCHIVES."""
     try:
         found = sorted(
-            d for d in os.listdir(base)
-            if ARCHIVE_NAME.fullmatch(nfc(d)) and os.path.isdir(os.path.join(base, d))
+            d for d in os.listdir(base) if ARCHIVE_NAME.fullmatch(nfc(d)) and os.path.isdir(os.path.join(base, d))
         )
     except OSError:
         found = []

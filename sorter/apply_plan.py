@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
 """Applies a tidying plan (JSON produced by the audit of a folder) in iCloud.
 
-  apply_plan.py verify tidy-plan.json [tidy-plan2.json …]  -> checks, touches nothing
-  apply_plan.py apply tidy-plan.json [tidy-plan2.json …]   -> moves / renames / sends to the Trash, writes an undo journal in data/
-  apply_plan.py undo data/undo-tidy-<date>.json           -> puts the moved files back
+  python3 -m sorter.apply_plan verify tidy-plan.json [tidy-plan2.json …]  -> checks, touches nothing
+  python3 -m sorter.apply_plan apply tidy-plan.json [tidy-plan2.json …]   -> moves / renames / sends to the Trash, writes an undo journal in data/
+  python3 -m sorter.apply_plan undo data/undo-tidy-<date>.json            -> puts the moved files back
 ROOT=<folder> works on another root than iCloud (the Drive, for example).
 """
-import json, os, shutil, subprocess, sys, unicodedata
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import unicodedata
 from datetime import datetime
 
-ROOT = os.path.expanduser(os.environ.get("ROOT", "~/Library/Mobile Documents/com~apple~CloudDocs"))   # ROOT=… for the Drive
-HERE = os.path.dirname(os.path.abspath(__file__))
-nfc = lambda s: unicodedata.normalize("NFC", s)
+ROOT = os.path.expanduser(
+    os.environ.get("ROOT", "~/Library/Mobile Documents/com~apple~CloudDocs")
+)  # ROOT=… for the Drive
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def nfc(text):
+    return unicodedata.normalize("NFC", text)
 
 
 def resolve(rel):
@@ -37,7 +48,8 @@ def find(rel):
 def load(files):
     ops = []
     for f in files:
-        ops += json.load(open(f))["operations"]
+        with open(f, encoding="utf-8") as handle:
+            ops += json.load(handle)["operations"]
     return ops
 
 
@@ -55,7 +67,9 @@ def check(ops):
             if d in dsts:
                 errors.append(f"duplicate destination: {d}")
             dsts.add(d)
-            if find(o["dst"]) and nfc(o["dst"]).lower() != s.lower() and nfc(o["dst"]) not in srcs:   # a mere change of case: not a conflict
+            if (
+                find(o["dst"]) and nfc(o["dst"]).lower() != s.lower() and nfc(o["dst"]) not in srcs
+            ):  # a mere change of case: not a conflict
                 errors.append(f"would overwrite: {d}")
         elif o["op"] != "trash":
             errors.append(f"unknown operation: {o}")
@@ -72,7 +86,7 @@ def to_trash(p):
 
 
 def apply_ops(ops):
-    journal = []   # undo journal; its French keys (corbeille, de, vers) are read back by `undo`
+    journal = []  # undo journal; its French keys (corbeille, de, vers) are read back by `undo`
     # 1. Trash, 2. moves through a temporary name (avoids conflicts when two names are swapped)
     for o in ops:
         if o["op"] == "trash":
@@ -97,19 +111,24 @@ def apply_ops(ops):
     # emptied folders
     for r, ds, fs in sorted(os.walk(ROOT), key=lambda x: -len(x[0])):
         if r == ROOT or "/." in r or os.path.dirname(r) == ROOT or os.path.basename(r).startswith("00 "):
-            continue   # never a first-level folder nor a « 00 … » inbox, even empty
+            continue  # never a first-level folder nor a « 00 … » inbox, even empty
         left = [f for f in os.listdir(r) if f not in (".DS_Store",)]
         if not left:
             if os.path.exists(os.path.join(r, ".DS_Store")):
                 os.remove(os.path.join(r, ".DS_Store"))
             os.rmdir(r)
     name = os.path.join(HERE, "data", f"undo-tidy-{datetime.now():%Y%m%d-%H%M%S}.json")
-    json.dump(journal, open(name, "w"), ensure_ascii=False, indent=1)
-    print(f"{sum('vers' in j for j in journal)} moved/renamed, {sum('corbeille' in j for j in journal)} sent to the Trash; undo: {name}")
+    with open(name, "w", encoding="utf-8") as handle:
+        json.dump(journal, handle, ensure_ascii=False, indent=1)
+    print(
+        f"{sum('vers' in j for j in journal)} moved/renamed, {sum('corbeille' in j for j in journal)} sent to the Trash; undo: {name}"
+    )
 
 
 def undo(journal):
-    for j in reversed(json.load(open(journal))):
+    with open(journal, encoding="utf-8") as handle:
+        entries = json.load(handle)
+    for j in reversed(entries):
         if "vers" in j and find(j["vers"]):
             d = resolve(j["de"])
             os.makedirs(os.path.dirname(d), exist_ok=True)
@@ -119,8 +138,8 @@ def undo(journal):
 
 if __name__ == "__main__":
     command, args = sys.argv[1], sys.argv[2:]
-    if command not in ("verify", "apply", "undo"):   # anything else would only check, and look like a success
-        sys.exit("usage: apply_plan.py verify|apply <plan.json>… | undo <journal.json>")
+    if command not in ("verify", "apply", "undo"):  # anything else would only check, and look like a success
+        sys.exit("usage: python3 -m sorter.apply_plan verify|apply <plan.json>… | undo <journal.json>")
     if command == "undo":
         undo(args[0])
         sys.exit()
