@@ -13,9 +13,11 @@ import activity
 from sorter.config import (
     CLAUDE_AI,
     CLEANUP,
+    CLOUD_AI,
     DECISIONS,
     DRIVE,
     DRIVE_RCLONE,
+    ENGINE,
     ICLOUD,
     KEPT_FROM_TRASH,
     LOCAL_AI,
@@ -575,7 +577,7 @@ class Review:
             ask(items, question, False, "review: ") if items else ([], [], {}, {}, {}, None, [])
         )
         verdicts = judge(
-            {**{p: (d, LOCAL_AI) for p, d in local.items()}, **{p: (d, CLAUDE_AI) for p, d in claude.items()}},
+            {**{p: (d, LOCAL_AI) for p, d in local.items()}, **{p: (d, CLOUD_AI) for p, d in claude.items()}},
             groups,
             copies,
         )
@@ -602,7 +604,8 @@ class Review:
             if prev and prev.get("state") != "unanswered" and not self.due(keys[path]):
                 continue
             retried.append(path)
-            why = missing.get(path) or (f"Claude : {public_reason(failure, 'decide')}" if failure and path in to_claude_set else "absent de sa réponse")
+            provider_label = "Antigravity" if ENGINE == "antigravity" else "Claude"
+            why = missing.get(path) or (f"{provider_label} : {public_reason(failure, 'decide')}" if failure and path in to_claude_set else "absent de sa réponse")
             own = not (missing.get(path, "").startswith("injoignable") or (failure is not None and path in to_claude_set and not input_error))
             self.files[keys[path]] = {
                 "path": os.path.relpath(path, base),

@@ -14,13 +14,18 @@ import urllib.request
 import activity
 
 from sorter.config import (
+    AGY,
+    AGY_AI,
+    AGY_MODEL,
     ATTACH_INBOX,
     CHROME_INBOXES,
     CLAUDE,
     CLAUDE_AI,
+    CLOUD_AI,
     CONVENTION,
     DOWNLOADS,
     DRIVE_INBOX,
+    ENGINE,
     GMAIL_INBOX,
     INBOX,
     LOCAL_AI,
@@ -150,7 +155,9 @@ def claude_error(res):
 
 
 def usage_limit(text):
-    """Format Claude usage-limit errors into a short French status message."""
+    """Format Claude or Antigravity usage-limit errors into a short French status message."""
+    if re.search(r"resource_exhausted|quota exceeded|rate limit", text, re.I) and "antigravity" in text.lower():
+        return "limite d'usage d'Antigravity atteinte"
     if "usage_limit_reached" not in text:
         return None
     found = re.search(r"resets (\d{1,2})(?::(\d\d))?\s*([ap]m)", text)
@@ -159,8 +166,8 @@ def usage_limit(text):
     return "limite d'usage de Claude atteinte" + suffix
 
 
-def ask_claude(items, question):
-    """Ask Claude CLI (Read tool only) to classify or review a batch of files."""
+def _build_cloud_blocks(items, question):
+    """Prepare text/image prompt blocks and readable staging paths for a cloud CLI."""
     blocks = []
     for path, txt in items:
         name = os.path.basename(path)
@@ -175,6 +182,32 @@ def ask_claude(items, question):
             if readable != path:
                 shutil.copy(path, readable)
             blocks.append(f"### {name}\nPas de texte extractible : lis-le avec l'outil Read à ce chemin exact : {readable}{question.read_hint}")
+    return blocks
+
+
+def ask_antigravity(items, question):
+    """Ask Antigravity CLI (`agy -p`, plan/read-only mode) to classify or review a batch of files."""
+    blocks = _build_cloud_blocks(items, question)
+    dirs = [arg for d in question.dirs if os.path.isdir(d) for arg in ("--add-dir", d)]
+    cmd = [
+        AGY, "-p", question.prompt(blocks), "--model", AGY_MODEL, "--mode", "plan",
+        "--output-format", "json", "--json-schema", json.dumps(question.schema),
+        "--disable-slash-commands", "--dangerously-skip-permissions", *dirs,
+    ]
+    env = dict(os.environ, PATH=f"{os.path.dirname(AGY)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=900, cwd=tempfile.gettempdir(), env=env, stdin=subprocess.DEVNULL)
+    if res.returncode != 0:
+        raise RuntimeError(f"antigravity failed ({res.returncode}): {claude_error(res)}")
+    data = json.loads(res.stdout)
+    parsed = data.get("structured_output") or data.get("response") or data.get("result")
+    if isinstance(parsed, str):
+        parsed = json.loads(re.search(r"\{.*\}", parsed, re.S).group(0))
+    return parsed["fichiers"]
+
+
+def ask_claude(items, question):
+    """Ask Claude CLI (Read tool only) to classify or review a batch of files."""
+    blocks = _build_cloud_blocks(items, question)
     dirs = [arg for d in question.dirs if os.path.isdir(d) for arg in ("--add-dir", d)]
     cmd = [
         CLAUDE, "-p", question.prompt(blocks), "--model", MODEL, "--output-format", "json",
@@ -190,6 +223,11 @@ def ask_claude(items, question):
     if isinstance(parsed, str):
         parsed = json.loads(re.search(r"\{.*\}", parsed, re.S).group(0))
     return parsed["fichiers"]
+
+
+def ask_cloud(items, question):
+    """Dispatch cloud classification to Antigravity (default) or Claude depending on ENGINE."""
+    return ask_antigravity(items, question) if ENGINE == "antigravity" else ask_claude(items, question)
 
 
 def local_call(path, body, timeout=LOCAL_TIMEOUT):
@@ -366,14 +404,14 @@ def compare(texts, claude, local, missing, tree):
 
 
 def ask(items, question, shadow, tag=None):
-    """Route text items to the local model and visual items (or all in shadow mode) to Claude."""
+    """Route text items to the local model and visual items (or all in shadow mode) to the cloud engine."""
     texts = [(p, t) for p, t in items if t]
     to_claude = items if shadow else [(p, t) for p, t in items if not t]
     local, missing, groups = ask_local(texts, question, tag) if texts else ({}, {}, [])
     claude, failure = {}, None
     if to_claude:
         try:
-            claude = match(ask_claude(to_claude, question), [p for p, _ in to_claude])
+            claude = match(ask_cloud(to_claude, question), [p for p, _ in to_claude])
             groups.append([p for p, _ in to_claude])
         except Exception as exc:
             failure = exc
@@ -387,12 +425,12 @@ def choose(files):
     if SHADOW:
         if not failure:
             compare(texts, claude, local, missing, tree)
-        decided, unanswered = {p: (d, CLAUDE_AI) for p, d in claude.items()}, {}
+        decided, unanswered = {p: (d, CLOUD_AI) for p, d in claude.items()}, {}
     else:
-        decided = {**{p: (d, LOCAL_AI) for p, d in local.items()}, **{p: (d, CLAUDE_AI) for p, d in claude.items()}}
+        decided = {**{p: (d, LOCAL_AI) for p, d in local.items()}, **{p: (d, CLOUD_AI) for p, d in claude.items()}}
         unanswered = {p: (LOCAL_AI, why) for p, why in missing.items()}
     if not failure:
-        unanswered.update({p: (CLAUDE_AI, None) for p, _ in to_claude if p not in claude})
+        unanswered.update({p: (CLOUD_AI, None) for p, _ in to_claude if p not in claude})
     for path, (ai, why) in unanswered.items():
         log(f"SANS RÉPONSE {os.path.basename(path)}  ({f'local model: {why}; ' if why else ''}retried on the next pass)")
         activity.log(

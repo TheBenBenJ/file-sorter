@@ -181,7 +181,8 @@ def claude_asked():
 def run(*args, **env):
     """One pass of sort.py, by default as the server's unit runs it from 04/11/2026: Claude decides, the local model is compared."""
     e = {"PATH": f"{fake}:/usr/bin:/bin", "HOME": str(home), "LANG": "C.UTF-8", "FILE_SORTER_ICLOUD": str(icloud), "FILE_SORTER_DRIVE": str(drive),
-         "FILE_SORTER_DATA": str(data), "FILE_SORTER_CLAUDE": str(fake / "claude"), "FILE_SORTER_DRIVE_RCLONE": "gsort:", "FILE_SORTER_MIN_AGE": "0",
+         "FILE_SORTER_DATA": str(data), "FILE_SORTER_ENGINE": "claude", "FILE_SORTER_CLAUDE": str(fake / "claude"),
+         "FILE_SORTER_AGY": str(fake / "claude"), "FILE_SORTER_DRIVE_RCLONE": "gsort:", "FILE_SORTER_MIN_AGE": "0",
          "FILE_SORTER_LOCAL_URL": f"http://127.0.0.1:{LOCAL.server_port}", "FILE_SORTER_SHADOW": "1", "FILE_SORTER_REVIEW_PASS": "1",
          "FAKE_DRIVE": str(drive), "FAKE_ANSWERS": str(answers), "FAKE_CLAUDE_LOG": str(claude_log), **env}
     return subprocess.run([sys.executable, "-I", str(code / "sort.py"), *args], env=e, capture_output=True, text=True, timeout=120)
@@ -1123,6 +1124,18 @@ check("Drive's root: Claude reads a copy, never the whole Drive", question and s
 p = run("--apply", **cenv)
 check("Mac: takes a document of the Drive's root into iCloud", p.returncode == 0 and (icloud3 / "30 Santé" / "2026-11-05 Clinique - Réservation rendez-vous.pdf").exists()
       and not (drive3 / "Réservation-Rendez-vous-confirmé.pdf").exists())
+
+# ---- Antigravity engine (default when FILE_SORTER_ENGINE is antigravity) ----
+(icloud3 / "00 À trier" / "Scan-agy.pdf").write_bytes(b"%PDF-1.4 scan agy " + bytes(range(60)))
+answer({"Scan-agy.pdf": ("30 Santé", "2026-11-05 Labo - Scan agy.pdf", 0.92, "résultat labo")})
+claude_asked()
+p = run("--decide", **cenv, FILE_SORTER_ENGINE="antigravity", FILE_SORTER_SHADOW="0")
+aev = [json.loads(x) for x in (data3 / "activity.jsonl").read_text(encoding="utf-8").splitlines()]
+ae = next((x for x in aev if x["action"] == "rangé" and x["object"] == "Scan-agy.pdf"), None)
+check("antigravity engine: visual file classified via agy and logged with engine=antigravity",
+      p.returncode == 0 and ae and ae.get("engine") == "antigravity" and "gemini" in (ae.get("model") or "")
+      and claude_asked() == [["Scan-agy.pdf"]])
+
 shutil.rmtree(T)
 LOCAL.shutdown()
 

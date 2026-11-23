@@ -146,12 +146,13 @@ def _public_reason(exc, step):
     limit = usage_limit(str(exc))
     if limit:
         return limit
-    found = re.match(r"claude failed \((-?\d+)\)(?:: ([a-z_]+) : )?", str(exc))
+    found = re.match(r"(claude|antigravity) failed \((-?\d+)\)(?:: ([a-z_]+) : )?", str(exc))
     if found:
-        suffix = ", " + found.group(2) if found.group(2) else ""
-        return f"Claude a échoué (code {found.group(1)}{suffix})"
+        label = "Antigravity" if found.group(1) == "antigravity" else "Claude"
+        suffix = ", " + found.group(3) if found.group(3) else ""
+        return f"{label} a échoué (code {found.group(2)}{suffix})"
     if step == "decide" and isinstance(exc, (ValueError, KeyError, TypeError, AttributeError)):
-        return "réponse de Claude illisible"
+        return "réponse du modèle illisible"
     if isinstance(exc, OSError):
         return f"erreur système : {exc.strerror or type(exc).__name__}"
     return f"erreur {type(exc).__name__}"

@@ -91,13 +91,27 @@ PLAN = os.path.join(DATA, "plan.json")
 RESULTS = os.path.join(DATA, "results.json")
 APPLIED = os.path.join(DATA, "applied.json")
 
+def _default_agy():
+    for candidate in ("/usr/local/bin/agy", os.path.join(HOME, ".local/bin/agy")):
+        if os.path.isfile(candidate):
+            return candidate
+    return "/usr/local/bin/agy"
+
+
+ENGINE = (os.environ.get("FILE_SORTER_ENGINE") or "antigravity").strip().lower()
+if ENGINE not in ("antigravity", "claude"):
+    ENGINE = "antigravity"
+AGY = os.environ.get("FILE_SORTER_AGY") or _default_agy()
+AGY_MODEL = os.environ.get("FILE_SORTER_AGY_MODEL") or "gemini-3.8-flash-medium"
 CLAUDE = os.environ.get("FILE_SORTER_CLAUDE") or "/opt/homebrew/bin/claude"
 MODEL = os.environ.get("FILE_SORTER_MODEL", "haiku")
 LOCAL_URL = os.environ.get("FILE_SORTER_LOCAL_URL", "http://127.0.0.1:11234")
 LOCAL_MODEL = "qwen3.5-9b"
 SHADOW = os.environ.get("FILE_SORTER_SHADOW") == "1"
 LOCAL_CONTEXT, LOCAL_MARGIN, LOCAL_ANSWER, LOCAL_FILES, LOCAL_TIMEOUT = 16384, 256, 400, 5, 300
+AGY_AI = {"engine": "antigravity", "model": AGY_MODEL}
 CLAUDE_AI = {"engine": "claude", "model": MODEL}
+CLOUD_AI = AGY_AI if ENGINE == "antigravity" else CLAUDE_AI
 LOCAL_AI = {"engine": "local", "model": LOCAL_MODEL}
 
 MIN_AGE = int(os.environ.get("FILE_SORTER_MIN_AGE", "60"))
