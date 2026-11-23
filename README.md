@@ -68,8 +68,9 @@ Plan actions (`plan.json`): `ranger` (file it at `cible`), `doublon` (to the Tra
 
 **Original: everything on the Mac.** `sort.py` alone decides and moves (a launchd agent watching the inboxes, and every 30 minutes). `sort.py --dry-run` shows what it would do. This mode is also the rollback of the split one; the two never run at the same time.
 
-### Other scripts
+### Package layout & other scripts
 
+- `sort.py` + `sorter/`: `sort.py` is the root CLI entrypoint (and re-exports helpers used by `rename.py`). Its implementation lives in the `sorter/` package (`config.py`, `files.py`, `drive.py`, `models.py`, `journal.py`, `review.py`, `runner.py`).
 - `audit.py`: no AI; writes `tidiness-state.json` for a dashboard. Since 22/11/2026 it asks for nothing by hand (`total` 0: what the sorting cannot place stays in `00 À trier` or `~/Downloads` on purpose); loose files and doubtful names are kept as `vrac_info` and `noms_info` for the record. `sort.py` runs it after each pass on the Mac.
 - `rename.py plan|apply|undo`: bulk renaming of existing documents according to `convention.md`. `plan` writes `data/rename-plan.json` and a `.tsv` to review, `apply` keeps an undo journal (`data/rename-undo.json`), `undo` restores the names.
 - `apply_plan.py verify|apply|undo`: applies a tidying plan (a JSON list of `move` and `trash` operations) after checks, with an undo journal in `data/` (`undo-tidy-<date>.json`).
