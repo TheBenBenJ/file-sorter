@@ -2,11 +2,11 @@
 
 *Formerly `tri-icloud` (renamed on 03/11/2026, with its folders, log and environment variables; its scripts, files, options and subcommands got English names the same day).*
 
-Automatic filing of personal documents into a numbered folder tree on iCloud Drive (and Google Drive for office files). A model proposes a destination and a clean name for each new file (a local model for the files whose text can be read, Claude for scans and images); a plain Python script validates the proposal and moves the file. Nothing is ever overwritten, and when in doubt the file stays where it is. The documents already filed are read again too, a few at a time: each one is kept, archived or sent to the trash, so that the theme folders hold only what is still of use.
+Automatic filing of personal documents into a numbered folder tree on iCloud Drive (and Google Drive for office files). A model proposes a destination and a clean name for each new file (a local model for files whose text can be read; Antigravity `agy` by default — switchable to Claude via `/etc/home-server/ai-provider` — for scans and images); a plain Python script validates the proposal and moves the file. Nothing is ever overwritten, and when in doubt the file stays where it is. The documents already filed are read again too, a few at a time: each one is kept, archived or sent to the trash, so that the theme folders hold only what is still of use.
 
 Why: documents arrive from many places (the phone, the browser's Downloads, invoices received by mail) and end up as `Document (1).pdf` in a pile. Filing them by hand is a chore; letting an AI move files on its own is a risk. Here the AI only reads and proposes, and the script decides.
 
-The code, its file names and its options are in English. The documents' folders and names, the naming convention and the prompt are French, because the tree and the names it produces are French (`00 À trier`, `50 Travail`, `2026-01-15 Fournisseur - Facture 42.pdf`).
+The code, its file names, tests, docs and options are in English (see [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md) for engineering standards, Ruff checks, and CI). The documents' folders and names, the naming convention and the prompt are French, because the tree and the names it produces are French (`00 À trier`, `50 Travail`, `2026-01-15 Fournisseur - Facture 42.pdf`).
 
 ## How it works
 
@@ -116,7 +116,12 @@ The file names above are shared between the server, the Mac and a dashboard, and
 
 ## Operations and troubleshooting
 
-Checks after any change: `python3 -I tests/test_sorter.py` (offline: a sandbox with the example settings, a fake `claude`, a fake local model and a fake `rclone`; it also measures the local model's questions against its slot; the CI runs it too).
+Checks after any change:
+```sh
+ruff check . && ruff format --check .
+python3 -I tests/test_models_and_files.py
+python3 -I tests/test_sorter.py   # offline sandbox (fake models & rclone); CI runs all tests/test_*.py on Ubuntu
+```
 
 Activity journal and step report (`sort.py --decide` only: the server is their single writer; the Mac writes neither), for the System tab of the owner's dashboard, in `FILE_SORTER_DATA`:
 

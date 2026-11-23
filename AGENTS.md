@@ -18,19 +18,23 @@ Operational guide for modifying `file-sorter` cleanly and safely. Full behavior 
 | `sorter/audit.py` | Read-only tidiness audit (`python3 -m sorter.audit`, writes `tidiness-state.json` for Dashboard) |
 | `sorter/rename.py` | Bulk renaming helper (`python3 -m sorter.rename plan\|apply\|undo`) |
 | `sorter/apply_plan.py` | Standalone tidying plan applier (`python3 -m sorter.apply_plan verify\|apply\|undo`) |
-| `tests/test_sorter.py` | Offline sandbox test suite (`python3 -I tests/test_sorter.py`), also run in `.github/workflows/ci.yml` |
+| `tests/test_sorter.py`, `tests/test_models_and_files.py` | Offline `python3 -I` test suites (run in `.github/workflows/ci.yml`) |
 | `pyproject.toml` | Ruff linter and formatter configuration (PEP 8, Python 3.14 target, 120-char line length) |
 
-## 2. Invariant Rules
+## 2. Invariant Rules & Engineering Standards
 - **Root entrypoint**: never rename or move `sort.py` (invoked directly by systemd/launchd jobs and the Mac relay). Keep `sort.py` re-exports intact.
-- **Zero-dependency standard library**: keep all runtime code stdlib-only (no third-party pip dependencies).
+- **Zero-dependency standard library**: keep all runtime code stdlib-only (`python3 -I` compatible).
+- **Clean structure & typed models**: keep functions concise (~30–100 lines); use stdlib `@dataclass` models with `.to_dict()` for structured payloads rather than building ad-hoc nested dicts inline.
 - **Contracts**: keep French log prefixes (`RANGÉ`, `GARDÉ`, `DOUBLON`, `DÉPOSÉ`, `VERSÉ`, `LAISSÉ`, `PLAN`, `MAC`, `ERREUR`, `SANS RÉPONSE`, `ATTENTE`, `TROP GROS`, `À DÉPOSER`, `BILAN`, `RELU`, `REVU`), French JSON contract keys (`plan.json`, `results.json`, `SCHEMA`, `REVIEW_SCHEMA`, `activity.jsonl`), and French user-facing prompts/notifications unchanged.
-- **Language**: all code, filenames, comments, docstrings, and commit messages in **English**.
+- **Language**: 100% of code, filenames, comments, docstrings, tests, docs, and commit messages in **English**.
+- **Tests & docs**: every new rule, safeguard, or bug fix requires offline tests in `tests/test_*.py`, and `README.md`/`CLAUDE.md`/`AGENTS.md` must stay up to date.
 - **Privacy & secrets**: never commit real `settings.json`, `convention.md`, `rules.md`, `review-rules.md`, `data/`, logs, or private filenames.
+- **Never push directly to `main`** without explicit user validation.
 - **Validation**: before every commit, run:
   ```sh
   ruff check . && ruff format --check .
-  python3 -m py_compile sort.py sorter/*.py tests/test_sorter.py
+  python3 -m py_compile sort.py sorter/*.py tests/test_*.py
+  python3 -I tests/test_models_and_files.py
   python3 -I tests/test_sorter.py
   ```
-  (Note: `tests/test_sorter.py` expects Linux `notifier` for 2 notification assertions; CI runs `python -I tests/test_sorter.py` on Ubuntu.)
+  (Note: `tests/test_sorter.py` expects Linux `notifier` for 2 notification assertions; CI runs all `tests/test_*.py` on Ubuntu.)
