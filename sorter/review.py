@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import time
+from dataclasses import dataclass
 from datetime import datetime
 
 from sorter import activity
@@ -221,6 +222,52 @@ def listing(docs, chunk):
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class FolderBatch:
+    """One theme folder slice selected for review."""
+
+    here: tuple
+    root: str
+    base: str
+    cur: str
+    rel: str
+    listed: list[str]
+    docs: list[str]
+    keys: dict[str, str]
+    chunk: list[str]
+    complete: bool
+
+
+def _judge_single(ans: dict, ai: dict | None, others: list[str]) -> list:
+    """Evaluate a single model decision against confidence and copy-naming rules."""
+    decision = wanted = ans.get("decision") if ans.get("decision") in DECISIONS else "garder"
+    raw_conf = ans.get("confiance")
+    conf = float(raw_conf) if type(raw_conf) in (int, float) and 0 <= raw_conf <= 1 else 0.0
+    reason = str(ans.get("raison") or "").strip().rstrip(".")
+    kept, proposed = None, None
+    if decision != "garder" and conf < REVIEW_LEAVE:
+        decision, proposed = "garder", f"{decision}, pas assez sûr"
+    cited: list[str] = []
+    if decision == "supprimer" and ans.get("doublon_de"):
+        kept = named(ans["doublon_de"], others)
+        if not kept:
+            decision, proposed = "garder", "supprimer comme copie d'un fichier qu'il n'a pas vu"
+    elif decision == "supprimer":
+        cited = sorted(
+            (x for x in others if nfc(os.path.basename(x)).lower() in nfc(reason).lower()),
+            key=lambda x: -len(os.path.basename(x)),
+        )
+        if COPY_WORDS.search(reason):
+            kept = (
+                cited[0]
+                if len(cited) == 1 or (cited and len(os.path.basename(cited[0])) > len(os.path.basename(cited[1])))
+                else None
+            )
+            if not kept:
+                decision, proposed = "garder", "supprimer comme copie, sans nommer le fichier gardé"
+    return [decision, conf, kept, reason, ai, proposed, wanted, cited]
+
+
 def judge(decided, groups, copies):
     """Validate review decisions with confidence thresholds and copy safeguards."""
     together = {p: grp for grp in groups for p in grp}
@@ -228,33 +275,8 @@ def judge(decided, groups, copies):
     out = {}
     for path in order:
         ans, ai = decided[path]
-        decision = wanted = ans.get("decision") if ans.get("decision") in DECISIONS else "garder"
-        raw_conf = ans.get("confiance")
-        conf = float(raw_conf) if type(raw_conf) in (int, float) and 0 <= raw_conf <= 1 else 0.0
-        reason = str(ans.get("raison") or "").strip().rstrip(".")
-        kept, proposed = None, None
-        if decision != "garder" and conf < REVIEW_LEAVE:
-            decision, proposed = "garder", f"{decision}, pas assez sûr"
         others = [x for x in together.get(path, ()) if x != path]
-        cited = []
-        if decision == "supprimer" and ans.get("doublon_de"):
-            kept = named(ans["doublon_de"], others)
-            if not kept:
-                decision, proposed = "garder", "supprimer comme copie d'un fichier qu'il n'a pas vu"
-        elif decision == "supprimer":
-            cited = sorted(
-                (x for x in others if nfc(os.path.basename(x)).lower() in nfc(reason).lower()),
-                key=lambda x: -len(os.path.basename(x)),
-            )
-            if COPY_WORDS.search(reason):
-                kept = (
-                    cited[0]
-                    if len(cited) == 1 or (cited and len(os.path.basename(cited[0])) > len(os.path.basename(cited[1])))
-                    else None
-                )
-                if not kept:
-                    decision, proposed = "garder", "supprimer comme copie, sans nommer le fichier gardé"
-        out[path] = [decision, conf, kept, reason, ai, proposed, wanted, cited]
+        out[path] = _judge_single(ans, ai, others)
 
     for path in order:
         verdict = out[path]
@@ -271,129 +293,145 @@ def judge(decided, groups, copies):
     return {p: tuple(v[:7]) for p, v in out.items()}
 
 
+def _entry_loc(key: str, entry: dict) -> tuple[str, str]:
+    """Return (root, nfc_dir) for a review.json entry."""
+    return (key.split("|", 1)[0], nfc(os.path.dirname(entry["path"])))
+
+
+def _load_review_state() -> tuple[dict, bool]:
+    """Read and sanitize review.json, returning (state, was_broken)."""
+    state, broken = read_json(REVIEW, {}), False
+    if not isinstance(state, dict) or not isinstance(state.get("files", {}), dict):
+        log("review: review.json unreadable, the review starts again from the first folder")
+        state, broken = {}, True
+    state["files"] = {
+        k: e
+        for k, e in (state.get("files") or {}).items()
+        if isinstance(e, dict) and isinstance(e.get("path"), str) and k.count("|") >= 2
+    }
+    cursor = state.get("cursor")
+    valid_cursor = (
+        isinstance(cursor, list) and cursor and type(cursor[0]) is int and all(isinstance(x, str) for x in cursor[1:])
+    )
+    if not valid_cursor:
+        state["cursor"] = None
+    state["withdrawn"] = {
+        k: w
+        for k, w in (state.get("withdrawn") or {}).items()
+        if isinstance(w, dict) and isinstance(w.get("action"), dict) and w["action"].get("id") == k
+    }
+    return state, broken
+
+
+def _due_for_rule_migration(files: dict[str, dict], before: int) -> set[str]:
+    """Collect review.json keys that must be re-read when upgrading from rule version `before`."""
+    again = set()
+    if before < 2:
+        again = {
+            _entry_loc(k, e)
+            for k, e in files.items()
+            if e.get("decision") == "garder"
+            and e.get("state") == "kept"
+            and e.get("engine")
+            and type(e.get("confidence")) in (int, float)
+            and REVIEW_LEAVE <= e["confidence"] < REVIEW_TRASH
+        }
+    due = {k for k, e in files.items() if _entry_loc(k, e) in again}
+    if before < 3:
+        due |= {k for k, e in files.items() if e.get("state") == "kept" and e.get("engine")}
+    if before < 4:
+        due |= {k for k, e in files.items() if e.get("engine") and e.get("state") in ("kept", "pending")}
+    if before < 6:
+        buying = re.compile(
+            r"acte de vente|promesse|compromis|offre d'achat|lettre d'intention|financement|prêt immobilier|copropriété|diagnostic",
+            re.I,
+        )
+        places = {_entry_loc(k, e) for k, e in files.items() if buying.search(nfc(os.path.basename(e["path"])))}
+        due |= {
+            k
+            for k, e in files.items()
+            if _entry_loc(k, e) in places and e.get("engine") and e.get("state") in ("kept", "pending")
+        }
+    if before < 7:
+        due |= {
+            k
+            for k, e in files.items()
+            if e.get("reason") == UNREAD_FORMAT and not e.get("engine") and e.get("state") == "kept"
+        }
+    return due
+
+
+def _reset_due_entries(state: dict, due: set[str], reason_prefix: str) -> None:
+    """Reset timestamps of `due` entries and restart the walk from the beginning."""
+    for key in due:
+        state["files"][key]["time"] = 0
+    if due:
+        state["cursor"] = None
+        state.pop("rest_until", None)
+        state["bilan_at_end"] = True
+        folder_count = len({_entry_loc(k, state["files"][k]) for k in due})
+        log(f"review: {reason_prefix}, {folder_count} folder(s) read again ({len(due)} document(s))")
+
+
+def _migrate_review_rules(state: dict) -> bool:
+    """Upgrade persisted review state to REVIEW_RULES if needed, returning True if migrated."""
+    before = state.get("rules", 1)
+    if before >= REVIEW_RULES:
+        return False
+    due = _due_for_rule_migration(state["files"], before)
+    _reset_due_entries(state, due, "new rules")
+    state["rules"] = REVIEW_RULES
+    return True
+
+
+def _sync_owner_rules(state: dict) -> bool:
+    """Re-schedule AI-decided entries whenever rules.md or review-rules.md changes."""
+    owner_hash = hashlib.sha1((RULES + "\n" + REVIEW_OWNER).encode("utf-8")).hexdigest()[:12]
+    if state.get("owner") == owner_hash:
+        return False
+    if "owner" in state or REVIEW_OWNER:
+        again = {k for k, e in state["files"].items() if e.get("engine") and e.get("state") in ("kept", "pending")}
+        _reset_due_entries(state, again, "the owner's rules changed")
+    state["owner"] = owner_hash
+    return True
+
+
+def _spare_no_trash_pending(state: dict, later: list) -> bool:
+    """Convert pending trash decisions under REVIEW_NO_TRASH roots into archive decisions."""
+    spared = [
+        (k.split("|", 1)[0], e)
+        for k, e in state["files"].items()
+        if k.split("|", 1)[0] in REVIEW_NO_TRASH and e.get("decision") == "supprimer" and e.get("state") == "pending"
+    ]
+    for root in REVIEW_NO_TRASH:
+        mine = [e for r, e in spared if r == root]
+        for entry in mine:
+            entry.update(decision="archiver", proposal="supprimer")
+        if mine:
+            log(
+                f"review: {len(mine)} decision(s) to trash in {place(root)} go into its archive instead: nothing is trashed there"
+            )
+            later.append(
+                (
+                    "revu",
+                    place(root),
+                    {
+                        "detail": f"{len(mine)} document(s) proposé(s) pour la corbeille partent plutôt aux archives : {kept_from_trash(root)}"
+                    },
+                )
+            )
+    return bool(spared)
+
+
 class Review:
     """State machine for reviewing theme folders within a --decide pass."""
 
     def __init__(self, actions, later):
         self.now = time.time()
-        state, broken = read_json(REVIEW, {}), False
-        if not isinstance(state, dict) or not isinstance(state.get("files", {}), dict):
-            log("review: review.json unreadable, the review starts again from the first folder")
-            state, broken = {}, True
-        state["files"] = {
-            k: e
-            for k, e in (state.get("files") or {}).items()
-            if isinstance(e, dict) and isinstance(e.get("path"), str) and k.count("|") >= 2
-        }
-        cursor = state.get("cursor")
-        if not (
-            isinstance(cursor, list)
-            and cursor
-            and type(cursor[0]) is int
-            and all(isinstance(x, str) for x in cursor[1:])
-        ):
-            state["cursor"] = None
-        state["withdrawn"] = {
-            k: w
-            for k, w in (state.get("withdrawn") or {}).items()
-            if isinstance(w, dict) and isinstance(w.get("action"), dict) and w["action"].get("id") == k
-        }
-
-        def loc(k, e):
-            return (k.split("|", 1)[0], nfc(os.path.dirname(e["path"])))
-
-        before = state.get("rules", 1)
-        migrated = before < REVIEW_RULES
-        if migrated:
-            again = set()
-            if before < 2:
-                again = {
-                    loc(k, e)
-                    for k, e in state["files"].items()
-                    if e.get("decision") == "garder"
-                    and e.get("state") == "kept"
-                    and e.get("engine")
-                    and type(e.get("confidence")) in (int, float)
-                    and REVIEW_LEAVE <= e["confidence"] < REVIEW_TRASH
-                }
-            due = {k for k, e in state["files"].items() if loc(k, e) in again}
-            if before < 3:
-                due |= {k for k, e in state["files"].items() if e.get("state") == "kept" and e.get("engine")}
-            if before < 4:
-                due |= {
-                    k for k, e in state["files"].items() if e.get("engine") and e.get("state") in ("kept", "pending")
-                }
-            if before < 6:
-                buying = re.compile(
-                    r"acte de vente|promesse|compromis|offre d'achat|lettre d'intention|financement|prêt immobilier|copropriété|diagnostic",
-                    re.I,
-                )
-                places = {
-                    loc(k, e) for k, e in state["files"].items() if buying.search(nfc(os.path.basename(e["path"])))
-                }
-                due |= {
-                    k
-                    for k, e in state["files"].items()
-                    if loc(k, e) in places and e.get("engine") and e.get("state") in ("kept", "pending")
-                }
-            if before < 7:
-                due |= {
-                    k
-                    for k, e in state["files"].items()
-                    if e.get("reason") == UNREAD_FORMAT and not e.get("engine") and e.get("state") == "kept"
-                }
-            for key in due:
-                state["files"][key]["time"] = 0
-            if due:
-                state["cursor"] = None
-                state.pop("rest_until", None)
-                state["bilan_at_end"] = True
-                log(
-                    f"review: new rules, {len({loc(k, state['files'][k]) for k in due})} folder(s) read again ({len(due)} document(s))"
-                )
-            state["rules"] = REVIEW_RULES
-
-        owner_hash = hashlib.sha1((RULES + "\n" + REVIEW_OWNER).encode("utf-8")).hexdigest()[:12]
-        if state.get("owner") != owner_hash:
-            if "owner" in state or REVIEW_OWNER:
-                again = {
-                    k for k, e in state["files"].items() if e.get("engine") and e.get("state") in ("kept", "pending")
-                }
-                for key in again:
-                    state["files"][key]["time"] = 0
-                if again:
-                    state["cursor"] = None
-                    state.pop("rest_until", None)
-                    state["bilan_at_end"] = True
-                    log(
-                        f"review: the owner's rules changed, {len({loc(k, state['files'][k]) for k in again})} folder(s) read again ({len(again)} document(s))"
-                    )
-            state["owner"], migrated = owner_hash, True
-
-        spared = [
-            (k.split("|", 1)[0], e)
-            for k, e in state["files"].items()
-            if k.split("|", 1)[0] in REVIEW_NO_TRASH
-            and e.get("decision") == "supprimer"
-            and e.get("state") == "pending"
-        ]
-        for root in REVIEW_NO_TRASH:
-            mine = [e for r, e in spared if r == root]
-            for entry in mine:
-                entry.update(decision="archiver", proposal="supprimer")
-            if mine:
-                log(
-                    f"review: {len(mine)} decision(s) to trash in {place(root)} go into its archive instead: nothing is trashed there"
-                )
-                later.append(
-                    (
-                        "revu",
-                        place(root),
-                        {
-                            "detail": f"{len(mine)} document(s) proposé(s) pour la corbeille partent plutôt aux archives : {kept_from_trash(root)}"
-                        },
-                    )
-                )
+        state, broken = _load_review_state()
+        migrated = _migrate_review_rules(state)
+        migrated = _sync_owner_rules(state) or migrated
+        spared = _spare_no_trash_pending(state, later)
         self.state = state
         self.files = state["files"]
         self.withdrawn = state["withdrawn"]
@@ -573,7 +611,7 @@ class Review:
         for here, root, base, cur, rel, names in theme_walk(cursor):
             found = self.folder(root, base, cur, rel, names)
             if found:
-                return self.read(here, root, base, cur, rel, *found)
+                return self.read(FolderBatch(here, root, base, cur, rel, *found))
             self.state["cursor"] = list(here)
         self.walk_over()
         return False
@@ -620,17 +658,180 @@ class Review:
         chunk = todo[:1] if alone else docs if len(docs) <= REVIEW_FILES else todo[:REVIEW_FILES]
         return listed, docs, keys, chunk, set(todo) <= set(chunk)
 
-    def read(self, here, root, base, cur, rel, listed, docs, keys, chunk, complete):
-        self.asked += len(chunk)
-        copies = {p: k for p, k in exact_copies(docs).items() if p in chunk}
-        asked = [p for p in chunk if p not in copies]
-        archive = archive_of(base)
-        text = listing(listed, chunk)
+    def _apply_verdict_guards(
+        self,
+        verdicts: dict[str, tuple],
+        copies: dict[str, str],
+        unread_docs: set[str],
+        root: str,
+    ) -> dict[str, tuple]:
+        """Downgrade trash verdicts to archive for unread documents or no-trash roots."""
+        guarded = {
+            p: ("archiver", *v[1:5], "supprimer, sur un nom seulement", v[6] or "supprimer")
+            if v[0] == "supprimer" and p not in copies and (p in unread_docs or v[2] in unread_docs)
+            else v
+            for p, v in verdicts.items()
+        }
+        if root not in REVIEW_NO_TRASH:
+            return guarded
+        suffix = " dans le Drive" if root == "drive" else ""
+        return {
+            p: ("archiver", *v[1:5], f"supprimer, jamais de corbeille{suffix}", v[6] or "supprimer")
+            if v[0] == "supprimer"
+            else v
+            for p, v in guarded.items()
+        }
+
+    def _record_unanswered(
+        self,
+        batch: FolderBatch,
+        unanswered: list[str],
+        to_claude_set: set[str],
+        missing: dict[str, str],
+        failure: Exception | None,
+    ) -> list[str]:
+        """Record unanswered documents in review state and return the retried subset."""
+        retried: list[str] = []
+        input_error = failure is not None and re.search(
+            r"invalid_request|could not process|too (long|large)|exceed", str(failure), re.I
+        )
+        provider_label = "Antigravity" if ENGINE == "antigravity" else "Claude"
+        for path in unanswered:
+            prev = self.files.get(batch.keys[path]) or {}
+            if prev and prev.get("state") != "unanswered" and not self.due(batch.keys[path]):
+                continue
+            retried.append(path)
+            why = missing.get(path) or (
+                f"{provider_label} : {public_reason(failure, 'decide')}"
+                if failure and path in to_claude_set
+                else "absent de sa réponse"
+            )
+            own = not (
+                missing.get(path, "").startswith("injoignable")
+                or (failure is not None and path in to_claude_set and not input_error)
+            )
+            self.files[batch.keys[path]] = {
+                "path": os.path.relpath(path, batch.base),
+                "state": "unanswered",
+                "time": self.now,
+                "reason": why,
+                "tries": (prev.get("tries", 0) if prev.get("state") == "unanswered" else 0) + own,
+            }
+            log(f"SANS RÉPONSE {os.path.basename(path)}  (review: {why}; try {self.files[batch.keys[path]]['tries']})")
+        return retried
+
+    def _record_single_verdict(
+        self,
+        batch: FolderBatch,
+        path: str,
+        verdict: tuple,
+        unread_docs: set[str],
+        archive: str,
+    ) -> str:
+        """Persist one judged verdict, log RELU, and schedule apply or trial journal events."""
+        decision, conf, kept, reason, ai, proposed, wanted = verdict
+        trial = CLEANUP != "on"
+        prev = self.files.get(batch.keys[path]) or {}
+        entry = self.files[batch.keys[path]] = {
+            "path": os.path.relpath(path, batch.base),
+            "decision": decision,
+            "confidence": round(conf, 3),
+            "reason": reason,
+            "twin": kept and os.path.relpath(kept, batch.base),
+            **(ai or {}),
+            **({"proposal": wanted} if wanted else {}),
+            **({"unread": True} if path in unread_docs else {}),
+            "time": self.now,
+            "state": "kept" if decision == "garder" else "pending",
+        }
+        log(
+            f"RELU    {os.path.basename(path)}  {decision} ({conf:.2f}{', ' + proposed if proposed else ''}) — {self.why(entry, batch.root)}"
+        )
+        if decision == "garder":
+            if prev.get("state") == "pending":
+                self.later.append(
+                    (
+                        "gardé",
+                        os.path.basename(path),
+                        {
+                            "src": place(batch.root, batch.rel),
+                            "detail": f"relu, reste finalement dans son dossier : {self.why(entry, batch.root)}",
+                            **({**ai, "confidence": conf} if ai else {}),
+                        },
+                    )
+                )
+            return decision
+        if not trial:
+            self.apply(batch.keys[path], entry)
+            return decision
+        if prev.get("state") == "pending" and (prev.get("decision"), prev.get("twin")) == (decision, entry["twin"]):
+            return decision
+        fields = {
+            "src": place(batch.root, batch.rel),
+            "detail": f"essai, rien n'a bougé : {self.why(entry, batch.root)}",
+            **({**ai, "confidence": conf} if ai else {}),
+        }
+        if decision == "archiver":
+            self.later.append(
+                (
+                    "à archiver",
+                    os.path.basename(path),
+                    {**fields, "dst": place(batch.root, nfc(os.path.join(archive, batch.rel)))},
+                )
+            )
+        else:
+            self.later.append(
+                (
+                    "à supprimer",
+                    os.path.basename(path),
+                    {**fields, "dst": "corbeille du Drive" if batch.root == "drive" else "Corbeille du Mac"},
+                )
+            )
+        return decision
+
+    def _record_verdicts(
+        self,
+        batch: FolderBatch,
+        verdicts: dict[str, tuple],
+        unread_docs: set[str],
+        archive: str,
+        unanswered_count: int,
+    ) -> None:
+        """Persist all verdicts for a folder chunk and emit the folder-level REVU summary."""
+        trial, counts, start = CLEANUP != "on", {d: 0 for d in DECISIONS}, len(self.later)
+        for path, verdict in verdicts.items():
+            decision = self._record_single_verdict(batch, path, verdict, unread_docs, archive)
+            counts[decision] += 1
+        if not verdicts:
+            return
+        words = ("à archiver", "à supprimer") if trial else ("archivé(s)", "supprimé(s)")
+        summary = (
+            f"{len(verdicts)} document(s) relu(s) : {counts['garder']} gardé(s), {counts['archiver']} {words[0]}, {counts['supprimer']} {words[1]}"
+            + (f", {unanswered_count} sans réponse" if unanswered_count else "")
+            + (" ; essai : rien n'a bougé" if trial else "")
+        )
+        self.later.insert(start, ("revu", place(batch.root, batch.rel), {"detail": summary}))
+        log(f"REVU    {place(batch.root, batch.rel)} : {summary}")
+        sweep = self.state.setdefault("sweep", {})
+        for key_name, count in (
+            ("files", len(verdicts)),
+            ("archiver", counts["archiver"]),
+            ("supprimer", counts["supprimer"]),
+        ):
+            sweep[key_name] = sweep.get(key_name, 0) + count
+
+    def read(self, batch: FolderBatch):
+        """Review one FolderBatch via models and exact-copy detection, updating state and cursor."""
+        self.asked += len(batch.chunk)
+        copies = {p: k for p, k in exact_copies(batch.docs).items() if p in batch.chunk}
+        asked = [p for p in batch.chunk if p not in copies]
+        archive = archive_of(batch.base)
+        text = listing(batch.listed, batch.chunk)
         question = Question(
-            lambda blocks, local=False: review_prompt(root, rel, text, archive, blocks, local),
+            lambda blocks, local=False: review_prompt(batch.root, batch.rel, text, archive, blocks, local),
             REVIEW_SCHEMA,
             REVIEW_ITEM,
-            (cur, PREVIEWS),
+            (batch.cur, PREVIEWS),
             " (la première page suffit)",
         )
         REPORT.running("decide")
@@ -645,131 +846,12 @@ class Review:
             groups,
             copies,
         )
-        verdicts = {
-            p: ("archiver", *v[1:5], "supprimer, sur un nom seulement", v[6] or "supprimer")
-            if v[0] == "supprimer" and p not in copies and (p in unread_docs or v[2] in unread_docs)
-            else v
-            for p, v in verdicts.items()
-        }
-        if root in REVIEW_NO_TRASH:
-            verdicts = {
-                p: (
-                    "archiver",
-                    *v[1:5],
-                    f"supprimer, jamais de corbeille{' dans le Drive' if root == 'drive' else ''}",
-                    v[6] or "supprimer",
-                )
-                if v[0] == "supprimer"
-                else v
-                for p, v in verdicts.items()
-            }
+        verdicts = self._apply_verdict_guards(verdicts, copies, unread_docs, batch.root)
         to_claude_set = {p for p, _ in to_claude}
         unanswered = [p for p in asked if p not in verdicts]
         out_of_reach = failure is not None or any(missing.get(p, "").startswith("injoignable") for p in unanswered)
-        retried = []
-        input_error = failure is not None and re.search(
-            r"invalid_request|could not process|too (long|large)|exceed", str(failure), re.I
-        )
-        for path in unanswered:
-            prev = self.files.get(keys[path]) or {}
-            if prev and prev.get("state") != "unanswered" and not self.due(keys[path]):
-                continue
-            retried.append(path)
-            provider_label = "Antigravity" if ENGINE == "antigravity" else "Claude"
-            why = missing.get(path) or (
-                f"{provider_label} : {public_reason(failure, 'decide')}"
-                if failure and path in to_claude_set
-                else "absent de sa réponse"
-            )
-            own = not (
-                missing.get(path, "").startswith("injoignable")
-                or (failure is not None and path in to_claude_set and not input_error)
-            )
-            self.files[keys[path]] = {
-                "path": os.path.relpath(path, base),
-                "state": "unanswered",
-                "time": self.now,
-                "reason": why,
-                "tries": (prev.get("tries", 0) if prev.get("state") == "unanswered" else 0) + own,
-            }
-            log(f"SANS RÉPONSE {os.path.basename(path)}  (review: {why}; try {self.files[keys[path]]['tries']})")
-
-        trial, counts, start = CLEANUP != "on", {d: 0 for d in DECISIONS}, len(self.later)
-        for path, (decision, conf, kept, reason, ai, proposed, wanted) in verdicts.items():
-            counts[decision] += 1
-            prev = self.files.get(keys[path]) or {}
-            entry = self.files[keys[path]] = {
-                "path": os.path.relpath(path, base),
-                "decision": decision,
-                "confidence": round(conf, 3),
-                "reason": reason,
-                "twin": kept and os.path.relpath(kept, base),
-                **(ai or {}),
-                **({"proposal": wanted} if wanted else {}),
-                **({"unread": True} if path in unread_docs else {}),
-                "time": self.now,
-                "state": "kept" if decision == "garder" else "pending",
-            }
-            log(
-                f"RELU    {os.path.basename(path)}  {decision} ({conf:.2f}{', ' + proposed if proposed else ''}) — {self.why(entry, root)}"
-            )
-            if decision == "garder":
-                if prev.get("state") == "pending":
-                    self.later.append(
-                        (
-                            "gardé",
-                            os.path.basename(path),
-                            {
-                                "src": place(root, rel),
-                                "detail": f"relu, reste finalement dans son dossier : {self.why(entry, root)}",
-                                **({**ai, "confidence": conf} if ai else {}),
-                            },
-                        )
-                    )
-                continue
-            if not trial:
-                self.apply(keys[path], entry)
-                continue
-            if prev.get("state") == "pending" and (prev.get("decision"), prev.get("twin")) == (decision, entry["twin"]):
-                continue
-            fields = {
-                "src": place(root, rel),
-                "detail": f"essai, rien n'a bougé : {self.why(entry, root)}",
-                **({**ai, "confidence": conf} if ai else {}),
-            }
-            if decision == "archiver":
-                self.later.append(
-                    (
-                        "à archiver",
-                        os.path.basename(path),
-                        {**fields, "dst": place(root, nfc(os.path.join(archive, rel)))},
-                    )
-                )
-            else:
-                self.later.append(
-                    (
-                        "à supprimer",
-                        os.path.basename(path),
-                        {**fields, "dst": "corbeille du Drive" if root == "drive" else "Corbeille du Mac"},
-                    )
-                )
-
-        if verdicts:
-            words = ("à archiver", "à supprimer") if trial else ("archivé(s)", "supprimé(s)")
-            summary = (
-                f"{len(verdicts)} document(s) relu(s) : {counts['garder']} gardé(s), {counts['archiver']} {words[0]}, {counts['supprimer']} {words[1]}"
-                + (f", {len(unanswered)} sans réponse" if unanswered else "")
-                + (" ; essai : rien n'a bougé" if trial else "")
-            )
-            self.later.insert(start, ("revu", place(root, rel), {"detail": summary}))
-            log(f"REVU    {place(root, rel)} : {summary}")
-            sweep = self.state.setdefault("sweep", {})
-            for key_name, count in (
-                ("files", len(verdicts)),
-                ("archiver", counts["archiver"]),
-                ("supprimer", counts["supprimer"]),
-            ):
-                sweep[key_name] = sweep.get(key_name, 0) + count
+        retried = self._record_unanswered(batch, unanswered, to_claude_set, missing, failure)
+        self._record_verdicts(batch, verdicts, unread_docs, archive, len(unanswered))
 
         if out_of_reach:
             self.state["pause_until"] = self.now + REVIEW_PAUSE
@@ -778,8 +860,10 @@ class Review:
             log(f"review: {len(unanswered)} document(s) without an answer ({why}): the review waits an hour")
         else:
             REPORT.set("decide", "ok")
-        if complete and not (out_of_reach and any(self.files[keys[p]]["tries"] < len(REVIEW_RETRIES) for p in retried)):
-            self.state["cursor"] = list(here)
+        if batch.complete and not (
+            out_of_reach and any(self.files[batch.keys[p]]["tries"] < len(REVIEW_RETRIES) for p in retried)
+        ):
+            self.state["cursor"] = list(batch.here)
         return True
 
     def walk_over(self):
@@ -815,61 +899,40 @@ class Review:
                     "rien n'a bougé. Le détail est dans le journal d'activité"
                 )
 
-    def bilan(self):
-        if self.state.get("bilan") == REVIEW_BILAN:
-            return
-        roots = [r for r in ("icloud", "drive") if self.mounted(r)]
-        if len(roots) < 2:
-            return
-        out, line, used, totals, count, on_name = [], [], 0, {}, 0, 0
-        for _, root, base, cur, rel, names in theme_walk(None):
-            piece = None
-            for name in sorted(names, key=lambda n: nfc(n).lower()):
-                path = os.path.join(cur, name)
-                if name.startswith(".") or not name.lower().endswith(REVIEW_EXT):
-                    continue
-                try:
-                    st = os.stat(path)
-                except OSError:
-                    continue
-                if not stat.S_ISREG(st.st_mode):
-                    continue
-                entry = self.files.get(f"{root}|{nfc(os.path.relpath(path, base))}|{st.st_size}") or {}
-                state, decision, conf = entry.get("state"), entry.get("decision"), entry.get("confidence")
-                if state == "done":
-                    continue
-                if not entry:
-                    row = [nfc(name), "n"]
-                elif state == "unanswered":
-                    row = [nfc(name), "u"]
-                elif state in ("pending", "failed") and decision in REVIEW_KINDS:
-                    if root in REVIEW_NO_TRASH and decision == "supprimer":
-                        entry = {**entry, "decision": "archiver", "proposal": "supprimer"}
-                    code = "x" if state == "failed" else "a" if entry["decision"] == "archiver" else "s"
-                    row = [nfc(name), code, conf, self.why(entry, root)]
-                elif entry.get("reason") == UNREAD_FORMAT and not entry.get("engine"):
-                    row = [nfc(name), "f"]
-                else:
-                    wanted = entry.get("proposal")
-                    row = [nfc(name), "g", conf] + (
-                        [wanted, entry.get("reason") or ""] if wanted in REVIEW_KINDS else []
-                    )
-                totals[row[1]] = totals.get(row[1], 0) + 1
-                count += 1
-                on_name += bool(entry.get("unread")) and row[1] in ("g", "a", "s", "x")
-                size = len(json.dumps(row, ensure_ascii=False)) + 1
-                if piece is None or used + size > REVIEW_BILAN_LINE:
-                    head = len(json.dumps({"r": root, "f": rel, "d": []}, ensure_ascii=False)) + 1
-                    if line and used + head + size > REVIEW_BILAN_LINE:
-                        out.append(line)
-                        line, used = [], 0
-                    piece = {"r": root, "f": rel, "d": []}
-                    line.append(piece)
-                    used += head
-                piece["d"].append(row)
-                used += size
-        if line:
-            out.append(line)
+    def _bilan_row(self, root: str, base: str, cur: str, name: str) -> tuple[list, bool] | None:
+        """Build one compact BILAN row and its on-name flag for a file, or None if skipped."""
+        if name.startswith(".") or not name.lower().endswith(REVIEW_EXT):
+            return None
+        path = os.path.join(cur, name)
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        entry = self.files.get(f"{root}|{nfc(os.path.relpath(path, base))}|{st.st_size}") or {}
+        state, decision, conf = entry.get("state"), entry.get("decision"), entry.get("confidence")
+        if state == "done":
+            return None
+        if not entry:
+            row = [nfc(name), "n"]
+        elif state == "unanswered":
+            row = [nfc(name), "u"]
+        elif state in ("pending", "failed") and decision in REVIEW_KINDS:
+            if root in REVIEW_NO_TRASH and decision == "supprimer":
+                entry = {**entry, "decision": "archiver", "proposal": "supprimer"}
+            code = "x" if state == "failed" else "a" if entry["decision"] == "archiver" else "s"
+            row = [nfc(name), code, conf, self.why(entry, root)]
+        elif entry.get("reason") == UNREAD_FORMAT and not entry.get("engine"):
+            row = [nfc(name), "f"]
+        else:
+            wanted = entry.get("proposal")
+            row = [nfc(name), "g", conf] + ([wanted, entry.get("reason") or ""] if wanted in REVIEW_KINDS else [])
+        on_name = bool(entry.get("unread")) and row[1] in ("g", "a", "s", "x")
+        return row, on_name
+
+    def _log_bilan(self, out: list, totals: dict[str, int], count: int, on_name: int) -> None:
+        """Emit numbered BILAN JSON lines and the closing totals summary line."""
         for idx, part in enumerate(out, 1):
             log(f"BILAN   {idx}/{len(out)} {json.dumps(part, ensure_ascii=False, separators=(',', ':'))}")
         words = {
@@ -887,4 +950,36 @@ class Review:
             + (f"; {on_name} decided on their name" if on_name else "")
             + f" (FILE_SORTER_CLEANUP={CLEANUP})"
         )
+
+    def bilan(self):
+        """Log a compact folder-by-folder JSON summary of review.json once per REVIEW_BILAN."""
+        if self.state.get("bilan") == REVIEW_BILAN:
+            return
+        if len([r for r in ("icloud", "drive") if self.mounted(r)]) < 2:
+            return
+        out, line, used, totals, count, on_name = [], [], 0, {}, 0, 0
+        for _, root, base, cur, rel, names in theme_walk(None):
+            piece = None
+            for name in sorted(names, key=lambda n: nfc(n).lower()):
+                built = self._bilan_row(root, base, cur, name)
+                if built is None:
+                    continue
+                row, decided_on_name = built
+                totals[row[1]] = totals.get(row[1], 0) + 1
+                count += 1
+                on_name += decided_on_name
+                size = len(json.dumps(row, ensure_ascii=False)) + 1
+                if piece is None or used + size > REVIEW_BILAN_LINE:
+                    head = len(json.dumps({"r": root, "f": rel, "d": []}, ensure_ascii=False)) + 1
+                    if line and used + head + size > REVIEW_BILAN_LINE:
+                        out.append(line)
+                        line, used = [], 0
+                    piece = {"r": root, "f": rel, "d": []}
+                    line.append(piece)
+                    used += head
+                piece["d"].append(row)
+                used += size
+        if line:
+            out.append(line)
+        self._log_bilan(out, totals, count, on_name)
         self.state["bilan"] = REVIEW_BILAN

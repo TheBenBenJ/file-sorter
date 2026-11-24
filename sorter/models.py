@@ -1,6 +1,7 @@
 """LLM prompts, strict JSON schemas, local/Claude routing, shadow comparison, and validation."""
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -318,58 +319,90 @@ def match(decisions, files):
     return found
 
 
-def ask_local(items, question, tag=None):
-    """Query the local LLM in token-budgeted batches, returning (answers, missing, groups)."""
-    if LOCAL_URL in ("", "off"):
-        return {}, {p: "FILE_SORTER_LOCAL_URL=off" for p, _ in items}, []
-    tag = ("shadow: " if SHADOW else "") if tag is None else tag
-    texts, answers, missing, groups = dict(items), {}, {}, []
+def _tokenize_local_items(
+    items: list[tuple[str, str]],
+    question: Question,
+    tag: str,
+) -> tuple[int, dict[str, int], None] | tuple[None, None, str]:
+    """Measure fixed prompt tokens and per-item token counts via the local /tokenize endpoint."""
     try:
         fixed = len(local_call("/tokenize", {"content": question.prompt([], True)}, 60)["tokens"])
         sizes = {p: len(local_call("/tokenize", {"content": text_block(p, t) + "\n"}, 60)["tokens"]) for p, t in items}
-    except Exception as exc:
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, KeyError, TypeError) as exc:
         log(f"{tag}local model unreachable: {type(exc).__name__} {str(exc)[:150]}")
-        return {}, {p: f"injoignable, {type(exc).__name__}" for p, _ in items}, []
+        return None, None, type(exc).__name__
+    return fixed, sizes, None
 
-    def room(n):
-        return LOCAL_CONTEXT - LOCAL_MARGIN - LOCAL_ANSWER * n - 100
 
-    queue, current = [], []
+def _batch_local_items(
+    items: list[tuple[str, str]],
+    fixed: int,
+    sizes: dict[str, int],
+) -> tuple[list[list[str]], dict[str, str]]:
+    """Pack items into token-budgeted batches, returning (queue, oversized_missing)."""
+
+    def room(count: int) -> int:
+        return LOCAL_CONTEXT - LOCAL_MARGIN - LOCAL_ANSWER * count - 100
+
+    queue: list[list[str]] = []
+    missing: dict[str, str] = {}
+    current: list[str] = []
     for path, _ in items:
         if fixed + sizes[path] > room(1):
             missing[path] = f"trop long pour un créneau, {fixed + sizes[path]} tokens"
             continue
-        if current and (
-            len(current) == LOCAL_FILES or fixed + sum(sizes[x] for x in current) + sizes[path] > room(len(current) + 1)
-        ):
+        next_tokens = fixed + sum(sizes[x] for x in current) + sizes[path]
+        if current and (len(current) == LOCAL_FILES or next_tokens > room(len(current) + 1)):
             queue.append(current)
             current = []
         current.append(path)
     if current:
         queue.append(current)
+    return queue, missing
+
+
+def _query_local_batch(
+    current: list[str],
+    texts: dict[str, str],
+    question: Question,
+) -> tuple[dict[str, dict], int | None]:
+    """Send one batch to /v1/chat/completions and parse its structured JSON response."""
+    names = [os.path.basename(p) for p in current]
+    body = {
+        "model": "local",
+        "temperature": 0,
+        "max_tokens": LOCAL_ANSWER * len(current) + 100,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "messages": [{"role": "user", "content": question.prompt([text_block(p, texts[p]) for p in current], True)}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "fichiers", "schema": local_schema(names, question.item), "strict": True},
+        },
+    }
+    resp = local_call("/v1/chat/completions", body)
+    choice = resp["choices"][0]
+    if choice.get("finish_reason") == "length":
+        raise ValueError("answer cut at max_tokens")
+    found = match(json.loads(choice["message"]["content"])["fichiers"], current)
+    prompt_tokens = (resp.get("usage") or {}).get("prompt_tokens")
+    return found, prompt_tokens
+
+
+def ask_local(items, question, tag=None):
+    """Query the local LLM in token-budgeted batches, returning (answers, missing, groups)."""
+    if LOCAL_URL in ("", "off"):
+        return {}, {p: "FILE_SORTER_LOCAL_URL=off" for p, _ in items}, []
+    tag = ("shadow: " if SHADOW else "") if tag is None else tag
+    fixed, sizes, err_name = _tokenize_local_items(items, question, tag)
+    if err_name is not None or fixed is None or sizes is None:
+        return {}, {p: f"injoignable, {err_name}" for p, _ in items}, []
+    texts, answers, groups = dict(items), {}, []
+    queue, missing = _batch_local_items(items, fixed, sizes)
 
     while queue:
         current = queue.pop(0)
-        names = [os.path.basename(p) for p in current]
-        body = {
-            "model": "local",
-            "temperature": 0,
-            "max_tokens": LOCAL_ANSWER * len(current) + 100,
-            "chat_template_kwargs": {"enable_thinking": False},
-            "messages": [
-                {"role": "user", "content": question.prompt([text_block(p, texts[p]) for p in current], True)}
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "fichiers", "schema": local_schema(names, question.item), "strict": True},
-            },
-        }
         try:
-            resp = local_call("/v1/chat/completions", body)
-            choice = resp["choices"][0]
-            if choice.get("finish_reason") == "length":
-                raise ValueError("answer cut at max_tokens")
-            found = match(json.loads(choice["message"]["content"])["fichiers"], current)
+            found, prompt_tokens = _query_local_batch(current, texts, question)
         except urllib.error.HTTPError as exc:
             if exc.code == 400 and len(current) > 1:
                 queue[:0] = [current[: len(current) // 2], current[len(current) // 2 :]]
@@ -381,14 +414,14 @@ def ask_local(items, question, tag=None):
             missing.update({p: f"injoignable, HTTP {exc.code}" for p in remaining})
             log(f"{tag}local model unavailable: HTTP {exc.code}, {len(remaining)} file(s) without its answer")
             break
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
             remaining = current + [x for grp in queue for x in grp]
             missing.update({p: f"injoignable, {type(exc).__name__}" for p in remaining})
             log(
                 f"{tag}local model unavailable: {type(exc).__name__} {str(exc)[:150]}, {len(remaining)} file(s) without its answer"
             )
             break
-        except Exception as exc:
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
             missing.update({p: f"réponse illisible, {type(exc).__name__}" for p in current})
             log(
                 f"{tag}local model's answer unreadable for {len(current)} file(s): {type(exc).__name__} {str(exc)[:150]}"
@@ -397,7 +430,6 @@ def ask_local(items, question, tag=None):
         answers.update(found)
         groups.append(current)
         missing.update({p: "absent de sa réponse" for p in current if p not in found})
-        prompt_tokens = (resp.get("usage") or {}).get("prompt_tokens")
         log(
             f"{tag}local model {LOCAL_MODEL}: {len(found)} of {len(current)} file(s) answered, {prompt_tokens} prompt tokens"
         )
@@ -459,7 +491,15 @@ def ask(items, question, shadow, tag=None):
         try:
             claude = match(ask_cloud(to_claude, question), [p for p, _ in to_claude])
             groups.append([p for p, _ in to_claude])
-        except Exception as exc:
+        except (
+            OSError,
+            subprocess.SubprocessError,
+            RuntimeError,
+            ValueError,
+            KeyError,
+            TypeError,
+            AttributeError,
+        ) as exc:
             failure = exc
     return texts, to_claude, local, missing, claude, failure, groups
 

@@ -69,7 +69,7 @@ def log(action, obj, src=None, dst=None, **fields):
         if size > MAX_BYTES and not rotated:
             rotated = True
             rotate()
-    except Exception as e:
+    except (OSError, ValueError, TypeError) as e:
         complain("activity journal", e)
 
 
@@ -109,7 +109,7 @@ def failed(obj, detail):
             return
         with open(_failing(), "w", encoding="utf-8") as f:
             f.write(now())
-    except Exception as e:
+    except OSError as e:
         complain("failure marker", e)
     log("échec", obj, detail=detail)
 
@@ -124,7 +124,7 @@ def recovered(obj):
         os.remove(_failing())
     except FileNotFoundError:
         return
-    except Exception as e:
+    except OSError as e:
         complain("failure marker", e)
         return
     try:
@@ -178,7 +178,7 @@ class Report:
             with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
                 json.dump({"time": self.time, "steps": self.steps}, f, ensure_ascii=False)
             os.replace(tmp, self.path)
-        except Exception as e:
+        except (OSError, TypeError, ValueError) as e:
             complain("step report", e)
             try:
                 os.remove(tmp)

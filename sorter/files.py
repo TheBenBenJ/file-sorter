@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import time
 import zipfile
+import zlib
 
 from sorter.config import (
     CHROME_INBOXES,
@@ -88,7 +89,7 @@ def load_kept():
     try:
         with open(KEPT, encoding="utf-8") as handle:
             return set(json.load(handle))
-    except Exception:
+    except OSError, ValueError, TypeError:
         return set()
 
 
@@ -165,7 +166,7 @@ def extract(path):
                 text = handle.read(6000)
         else:
             return None
-    except Exception:
+    except OSError, subprocess.SubprocessError, zipfile.BadZipFile, KeyError, RuntimeError, ValueError, zlib.error:
         return None
     text = re.sub(r"\s+", " ", text.replace("\x00", "")).strip()
     return text[:2500] if len(text) > 40 else None

@@ -3,5 +3,13 @@ target-version = "py314"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP"]
+select = ["E", "F", "W", "I", "UP", "C901", "PLR0912", "PLR0913", "PLR0915", "BLE001"]
 ignore = ["E501"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.pylint]
+max-args = 6
+max-branches = 12
+max-statements = 50

@@ -94,7 +94,7 @@ def mac_event(action, status):
     """Convert a plan action result returned by the Mac into an activity event tuple."""
     try:
         return _mac_event(action, str(status))
-    except Exception:
+    except KeyError, TypeError, ValueError, AttributeError, OSError:
         return "fait par le Mac", str(action.get("id", "?")), {"detail": str(status)}
 
 
@@ -143,7 +143,7 @@ def public_reason(exc, step):
     """Format a failure for run-status.json (French, no private filenames)."""
     try:
         return _public_reason(exc, step)
-    except Exception:
+    except KeyError, IndexError, TypeError, ValueError, AttributeError, OSError:
         return f"erreur {type(exc).__name__}"
 
 
