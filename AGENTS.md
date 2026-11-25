@@ -29,7 +29,7 @@ Operational guide for modifying `file-sorter` cleanly and safely. Full behavior 
 - **Language**: 100% of code, filenames, comments, docstrings, tests, docs, and commit messages in **English**.
 - **Tests & docs**: every new rule, safeguard, or bug fix requires offline tests in `tests/test_*.py`, and `README.md`/`CLAUDE.md`/`AGENTS.md` must stay up to date.
 - **Privacy & secrets**: never commit real `settings.json`, `convention.md`, `rules.md`, `review-rules.md`, `data/`, logs, or private filenames.
-- **Never push directly to `main`** without explicit user validation.
+- **Push directly to `main`, no pull request** (Benjamin, 26/11/2026), after every check: a green push to `main` deploys automatically.
 - **Validation**: before every commit, run:
   ```sh
   ruff check . && ruff format --check .

@@ -22,7 +22,7 @@ Automatic filing and review of personal documents across iCloud Drive and Google
    python3 -I tests/test_models_and_files.py
    python3 -I tests/test_sorter.py   # full sandbox suite (runs in Linux CI)
    ```
-6. **Never push directly to `main`** without Benjamin's explicit confirmation (a green push to `main` auto-promotes `production` and deploys to `pc-benjamin`).
+6. **Push directly to `main`, no pull request** (Benjamin, 26/11/2026), after every check: a green push to `main` deploys automatically.
 
 ## Readability Standards (Mandatory, same in every repository)
 
